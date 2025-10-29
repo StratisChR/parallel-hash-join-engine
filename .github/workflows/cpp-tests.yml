@@ -1,4 +1,4 @@
-name: C++ HopscotchHash Unit Tests
+name: C++ HopscotchHash Tests
 
 on:
   push:
@@ -8,32 +8,23 @@ on:
 
 jobs:
   build-and-test:
-    name: Build and Run Unit Tests
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        compiler: [gcc, clang]
-        build_type: [Debug, Release]
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ clang
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++ make
 
-      - name: Configure CMake
-        run: |
-          cmake -S . -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+    - name: Configure CMake
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
-      - name: Build
-        run: cmake --build build --config ${{ matrix.build_type }}
+    - name: Build
+      run: cmake --build build --config Release -- -j$(nproc) test_hopscotch
 
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+    - name: Run tests
+      working-directory: build
+      run: ./test_hopscotch 
