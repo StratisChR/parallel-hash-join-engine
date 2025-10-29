@@ -7,6 +7,7 @@
 #include <plan.h>
 #include <table.h>
 
+
 #if !defined(TEAMOPT_USE_DUCKDB) || defined(TEAMOPT_BUILD_CACHE)
 #include <sys/mman.h>
 #include <sys/stat.h>
