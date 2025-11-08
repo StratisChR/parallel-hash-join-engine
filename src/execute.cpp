@@ -2,7 +2,20 @@
 #include <plan.h>
 #include <table.h>
 
+#include "hopscotch_hash.h"
+#include "robin_hood_hash_map.h"
+#include "int_hasher.h"
+
 namespace Contest {
+
+enum class JoinStrategy {
+STD_UNORDERED_MAP, 
+HOPSCOTCH,         // Panagiotis Papapostolou
+ROBIN_HOOD,         // Theodoros Mpeioglou
+CUCKOO            // Stratis Charisiadis-Roussis
+};
+
+constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::ROBIN_HOOD;
 
 using ExecuteResult = std::vector<std::vector<Data>>;
 
@@ -16,10 +29,33 @@ struct JoinAlgorithm {
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
 
-    template <class T>
+
+    template <class T, class HasherT>
     auto run() {
         namespace views = ranges::views;
-        std::unordered_map<T, std::vector<size_t>> hash_table;
+
+        auto create_hash_table = [&]() {
+            if constexpr (CURRENT_STRATEGY == JoinStrategy::ROBIN_HOOD) {
+                // Θοδωρής.
+                return RobinHoodHashMap<T, std::vector<size_t>, HasherT>();
+            } 
+            else if constexpr (CURRENT_STRATEGY == JoinStrategy::HOPSCOTCH) {
+                // Παναγιώτης.
+                return HopscotchHash<T, std::vector<size_t>>();
+            }
+            else if constexpr (CURRENT_STRATEGY == JoinStrategy::CUCKOO) {
+                // Στρατής.
+                return CuckooHashMap<T, std::vector<size_t>, HasherT>();
+            }
+            else /* STD_UNORDERED_MAP */ {
+                // Βασικό. 
+                return std::unordered_map<T, std::vector<size_t>>();
+            }
+        };
+
+        // Create the one hash table we will use
+        auto hash_table = create_hash_table();
+
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
@@ -134,17 +170,17 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .output_attrs                        = output_attrs};
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
-        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-        case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-        case DataType::FP64:    join_algorithm.run<double>(); break;
-        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+        case DataType::INT32:   join_algorithm.run<int32_t, IntHasher>(); break;
+        case DataType::INT64:   join_algorithm.run<int64_t, IntHasher>(); break;
+        case DataType::FP64:    join_algorithm.run<double, std::hash<double>>(); break;
+        case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
         }
     } else {
         switch (std::get<1>(right_types[join.right_attr])) {
-        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-        case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-        case DataType::FP64:    join_algorithm.run<double>(); break;
-        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+        case DataType::INT32:   join_algorithm.run<int32_t, IntHasher>(); break;
+        case DataType::INT64:   join_algorithm.run<int64_t, IntHasher>(); break;
+        case DataType::FP64:    join_algorithm.run<double, std::hash<double>>(); break;
+        case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
         }
     }
 

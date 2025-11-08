@@ -88,7 +88,7 @@ endif()
 
 # Targets
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
-add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
+add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp tests/hash_unit_tests.cpp)
 add_executable(build_database tests/build_database.cpp)
 
 # For all executables
