@@ -21,40 +21,58 @@ struct JoinAlgorithm {
         namespace views = ranges::views;
         std::unordered_map<T, std::vector<size_t>> hash_table;
         if (build_left) {
+            // Loop iterates over the 'left' table
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
                     [&hash_table, idx = idx](const auto& key) {
+                        // Determine the type of the key
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+
+                            // find or create
                             if (auto itr = hash_table.find(key); itr == hash_table.end()) {
                                 hash_table.emplace(key, std::vector<size_t>(1, idx));
                             } else {
+                                // Found: append index
                                 itr->second.push_back(idx);
                             }
+
                         } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
                             throw std::runtime_error("wrong type of field");
                         }
                     },
                     record[left_col]);
             }
+            // Loop iterates over the 'right' table
             for (auto& right_record: right) {
+                // Get the join key from the right record
                 std::visit(
                     [&](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+                            // Look up the key in the hash table
                             if (auto itr = hash_table.find(key); itr != hash_table.end()) {
+                                // If found, iterate over all matching left records.
+                                // itr->second contains the indices of matching left records.
                                 for (auto left_idx: itr->second) {
+                                    // get the matching left record
                                     auto&             left_record = left[left_idx];
+                                    // create a new output row
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
+                                    // Loop over list of columns that should be in output
                                     for (auto [col_idx, _]: output_attrs) {
+                                        // Determine whether the column comes from left or right table
                                         if (col_idx < left_record.size()) {
+                                            // from left table
                                             new_record.emplace_back(left_record[col_idx]);
                                         } else {
+                                            // from right table
                                             new_record.emplace_back(
                                                 right_record[col_idx - left_record.size()]);
                                         }
                                     }
+                                    // Add the new record to results
                                     results.emplace_back(std::move(new_record));
                                 }
                             }
@@ -65,14 +83,18 @@ struct JoinAlgorithm {
                     right_record[right_col]);
             }
         } else {
+            // Loop iterates over the 'right' table
             for (auto&& [idx, record]: right | views::enumerate) {
                 std::visit(
                     [&hash_table, idx = idx](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+
+                            // If key is found, add the current record index to the list
                             if (auto itr = hash_table.find(key); itr == hash_table.end()) {
                                 hash_table.emplace(key, std::vector<size_t>(1, idx));
                             } else {
+                                // Key found, append index
                                 itr->second.push_back(idx);
                             }
                         } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
@@ -81,17 +103,22 @@ struct JoinAlgorithm {
                     },
                     record[right_col]);
             }
+            // Loop iterates over the 'left' table
             for (auto& left_record: left) {
+                // Get the join key from the left record
                 std::visit(
                     [&](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+                            // Look up the key in the hash table
                             if (auto itr = hash_table.find(key); itr != hash_table.end()) {
+                                // If found, iterate over all matching right records.
                                 for (auto right_idx: itr->second) {
                                     auto&             right_record = right[right_idx];
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
                                     for (auto [col_idx, _]: output_attrs) {
+                                        // Determine whether the column comes from left or right table
                                         if (col_idx < left_record.size()) {
                                             new_record.emplace_back(left_record[col_idx]);
                                         } else {
