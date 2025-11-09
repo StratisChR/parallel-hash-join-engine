@@ -22,6 +22,12 @@ Cuckoo: 238929 ms
 [removed] - Hopscotch  
 Χαρισιάδης Ρούσσης Στρατής - Cuckoo  
 
+# Σημείωση  
+
+Για να αλλάξουμε τον αλγόριθμο με τον οποίο τρέχει το πρόγραμμα δεν χρησιμοποιούμε command line arguments,
+προτιμήσαμε να θέσουμε μία μεταβλητή εντός του execute.cpp, την JoinStrategy, η οποία παίρνει 4
+διαφορετικές τιμές. Μία για κάθε δικό μας αλγόριθμο και μία για την βασική λύση με unordered map.
+
 --------------------------------------------------------------------------------------------
 
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/gjaw_qSU)
