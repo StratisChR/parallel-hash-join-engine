@@ -1,4 +1,4 @@
-name: C++ HopscotchHash Tests
+name: C++ algorithmsHash Tests
 
 on:
   push:
@@ -23,8 +23,8 @@ jobs:
       run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
     - name: Build
-      run: cmake --build build -- -j$(nproc) test_hopscotch
+      run: cmake --build build -- -j$(nproc) test_algorithms
 
     - name: Run tests
       working-directory: build
-      run: ./test_hopscotch 
+      run: ./test_algorithms 

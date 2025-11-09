@@ -1,3 +1,27 @@
+Ομάδα null:
+[removed] - [removed] - [removed]
+[removed] - [removed] - [removed]
+Χαρισιάδης Ρούσσης Στρατής - [removed] - [removed]
+
+# Ανάλυση Απόδοσης
+Τα παρακάτω αποτελέσματα είναι από μηχάνημα με 16GB RAM το οποίο τρέχει αποκλειστικά Linux.
+Hopscotch Hash: 5 - 7.5 % Βελτίωση
+Robinhood Hash: 1 - 3 % Βελτίωση 
+Cuckoo Hash: ~5% Μείωση Απόδοσης
+
+Συγκεκριμένα στο τελευταίο run που κάναμε:
+basic solution: 225135 ms
+Hopscotch: 210688 ms
+Robinhood: 223036 ms
+Cuckoo: 238929 ms
+
+# Διαμοιρασμός Εργασιών εντός ομάδας
+Αναλάβαμε ο καθένας από έναν αλγόριθμο, συγκεκριμένα:
+[removed] - Robinhood
+[removed] - Hopscotch
+Χαρισιάδης Ρούσσης Στρατής - Cuckoo
+--------------------------------------------------------------------------------------------
+
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/gjaw_qSU)
 # SIGMOD Contest 2025
 

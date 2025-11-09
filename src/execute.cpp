@@ -5,6 +5,7 @@
 
 #include "hopscotch_hash.h"
 #include "robin_hood_hash_map.h"
+#include "cuckoo_hash_map.h"
 #include "int_hasher.h"
 
 namespace Contest {
@@ -16,7 +17,7 @@ ROBIN_HOOD,         // Theodoros Mpeioglou
 CUCKOO            // Stratis Charisiadis-Roussis
 };
 
-constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::ROBIN_HOOD;
+constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::STD_UNORDERED_MAP;
 
 using ExecuteResult = std::vector<std::vector<Data>>;
 
