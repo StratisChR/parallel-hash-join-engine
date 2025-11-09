@@ -1,5 +1,6 @@
 #include <hardware.h>
 #include <plan.h>
+#include <hopscotch_hash.h>
 #include <table.h>
 
 #include "hopscotch_hash.h"
