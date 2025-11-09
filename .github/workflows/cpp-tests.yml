@@ -1,0 +1,30 @@
+name: C++ HopscotchHash Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++ make
+
+    - name: Configure CMake
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+
+    - name: Build
+      run: cmake --build build -- -j$(nproc) test_hopscotch
+
+    - name: Run tests
+      working-directory: build
+      run: ./test_hopscotch 
