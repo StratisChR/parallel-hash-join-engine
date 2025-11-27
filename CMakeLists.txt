@@ -90,6 +90,7 @@ endif()
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
 add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(test_algorithms ${SIGMODPC_SRC} tests/test_hopscotch.cpp tests/hash_unit_tests.cpp tests/cuckoo_tests.cpp)
+add_executable(string_handling_tests ${SIGMODPC_SRC} tests/string_handling_tests_S.cpp)
 add_executable(build_database tests/build_database.cpp)
 
 # For all executables
@@ -98,6 +99,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(test_algorithms PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(string_handling_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -116,11 +118,13 @@ target_compile_definitions(run PRIVATE TEAMOPT_USE_DUCKDB)
 target_link_libraries(build_database PRIVATE fmt duckdb)
 target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 target_link_libraries(test_algorithms PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
+target_link_libraries(string_handling_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 
 target_include_directories(run PRIVATE include)
 target_include_directories(build_database PRIVATE include)
 target_include_directories(unit_tests PRIVATE include)
 target_include_directories(test_algorithms PRIVATE include)
+target_include_directories(string_handling_tests PRIVATE include)
 
 
 
