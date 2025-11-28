@@ -19,6 +19,8 @@ ROBIN_HOOD,         // Theodoros Mpeioglou
 CUCKOO            // Stratis Charisiadis-Roussis
 };
 
+
+//choose join strategy here
 constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::HOPSCOTCH;
 
 using ExecuteResult = std::vector<std::vector<value_t>>;
