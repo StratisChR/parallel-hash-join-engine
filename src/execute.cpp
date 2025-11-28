@@ -25,7 +25,7 @@ using ExecuteResult = std::vector<std::vector<value_t>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Helper: materialize a string (std::string) from a value_t containing a StringRef
+
 static std::string materialize_string_from_value(const Plan& plan, const value_t& vv) {
     if (vv.type != value_t::Type::STRING) {
         throw std::runtime_error("materialize_string on non-string value");
@@ -73,7 +73,7 @@ struct JoinAlgorithm {
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
     const Plan*                                      plan_ptr;
 
-    // materialize a string from a value_t (which wraps a StringRef)
+    // materialize a string from a value_t 
     std::string materialize_string(const value_t& vv) const {
         if (vv.type != value_t::Type::STRING) {
             throw std::runtime_error("materialize_string on non-string value");
@@ -332,10 +332,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     return results;
 }
 
-// Special-case join that is at the root: directly produce ColumnarTable by
-// emitting Data rows while probing (materialize strings only when they
-// appear in the final output). This avoids creating an intermediate
-// ExecuteResult for the final result.
+
 ColumnarTable execute_hash_join_root(const Plan&          plan,
     const JoinNode&                                  join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
@@ -495,7 +492,7 @@ ColumnarTable execute_hash_join_root(const Plan&          plan,
         }
     }
 
-    // Convert rows (value_t row-store) directly to ColumnarTable
+    // Convert rows  directly to ColumnarTable
     // by constructing Data rows only for final materialization
     std::vector<std::vector<Data>> converted;
     converted.reserve(rows.size());
@@ -631,13 +628,13 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     }
 
     // otherwise fall back to executing the plan and converting the row-store
-    // result (value_t) into a ColumnarTable (legacy path)
+    // result  into a ColumnarTable 
     auto ret = execute_impl(plan, plan.root);
     auto ret_types = plan.nodes[plan.root].output_attrs
                    | views::transform([](const auto& v) { return std::get<1>(v); })
                    | ranges::to<std::vector<DataType>>();
 
-    // Convert row-store of value_t back into Data (materialize strings)
+    // Convert row-store of value_t back into Data 
     std::vector<std::vector<Data>> converted;
     converted.reserve(ret.size());
     for (auto& row: ret) {
@@ -688,7 +685,6 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
                     crec.emplace_back(std::monostate{});
                 }
             } else {
-                // unsupported types: return NULL
                 crec.emplace_back(std::monostate{});
             }
         }
