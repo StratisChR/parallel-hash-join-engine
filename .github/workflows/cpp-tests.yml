@@ -24,10 +24,12 @@ jobs:
       run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
     - name: Build
-      run: cmake --build build -- -j$(nproc) test_algorithms
-      run: cmake --build build -- -j$(nproc) test_indexing
+      run: |
+           cmake --build build -- -j$(nproc) test_algorithms
+           cmake --build build -- -j$(nproc) test_indexing
 
     - name: Run tests
       working-directory: build
-      run: ./test_algorithms 
-      run: ./test_indexing
+      run: |
+       ./test_algorithms 
+       ./test_indexing
