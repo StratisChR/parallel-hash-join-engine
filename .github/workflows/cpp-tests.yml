@@ -8,23 +8,23 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: 
+      group: k23a
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake g++ make
-
     - name: Configure CMake
       run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
     - name: Build
-      run: cmake --build build -- -j$(nproc) test_algorithms
+      run: |
+           cmake --build build -- -j$(nproc) test_algorithms
+           cmake --build build -- -j$(nproc) test_indexing
 
     - name: Run tests
       working-directory: build
-      run: ./test_algorithms 
+      run: |
+       ./test_algorithms 
+       ./test_indexing
