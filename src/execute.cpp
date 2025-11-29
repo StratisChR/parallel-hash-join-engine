@@ -21,7 +21,7 @@ CUCKOO            // Stratis Charisiadis-Roussis
 
 
 //choose join strategy here
-constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::STD_UNORDERED_MAP;
+constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::HOPSCOTCH;
 
 using ExecuteResult = std::vector<std::vector<value_t>>;
 

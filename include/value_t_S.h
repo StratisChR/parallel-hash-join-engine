@@ -108,6 +108,4 @@ struct value_t {
         page  = (data >> 12) & 0x3FFFFFFFFULL; // Mask for 34 bits
         row   = data & 0xFFF;           // Mask for 12 bits
     }
-
-    
 };
