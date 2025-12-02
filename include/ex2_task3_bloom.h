@@ -3,6 +3,8 @@
 #include <cstdint>
 #include "ex2_task3_hashes.h"
 
+inline std::array<uint16_t, 2048> bloom_tags = {};
+
 // Computes bloom filter bits from a given hash value.
 // We could also rehash the hash value to choose the bits, but 
 // we lose time for no reason. The hash is random enough
@@ -44,7 +46,6 @@ inline void precompute_bloom_tags(){
 // We get 11 bits from the hash, and use it to index 
 // into the precomputed tags.
 inline uint16_t compute_bloom_bits(uint64_t hash) {
-    
     uint16_t index = static_cast<uint16_t>((hash >> (32 - 11)) & 0x7FF);
     return bloom_tags[index];
 }
