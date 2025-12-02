@@ -107,6 +107,10 @@ private: // Utilities:
         return directory[slot];
     }
 
+    void set_slot_pointer(uint64_t directory_slot, uint64_t array_index){
+        directory[directory_slot] = array_index << 16;
+    }
+
     uint64_t get_slot_pointer(uint64_t slot) {
         uint64_t entry = get_entry(slot);
         uint64_t pointer = (entry & POINTER_MASK) >> 16;
@@ -178,12 +182,11 @@ private: // Utilities:
 
 private: // Everything related to rehashing/resizing:
 
-    // This function will decide in what way we will resize. 
-    // For example if it is still possible we grow the directory,
-    // however after a certain point that is not possible, we are limited 
-    // by the 64bits of each slot. When we reach that point,
-    // we instead grow the data array.
-    void grow_hash_table();
+    void double_directory(){
+        shift--;
+        capacity = 1ULL << (64 - shift);
+        directory.resize(capacity,0);
+    }
 
     // THis function first decreases shift by one. Then we allocate a new directory
     // and redestribute all tuples from the old dir to the new one.
@@ -193,6 +196,7 @@ private: // Everything related to rehashing/resizing:
     }
 
     // Create array, separate segments based on number in each directory slot.
+    // It also creates the pointers in the directory.
     void build_data_array(){
         // Initialize data array
         data.resize(num_elements);  // ← Changed from reserve() to resize()
@@ -203,6 +207,17 @@ private: // Everything related to rehashing/resizing:
             pair.second = 0;
         }
 
+        for (uint64_t i = 0; i < capacity; i++)
+        {
+            uint64_t tuples_in_segment = directory[i];
+            if (i == 0)
+            {
+                set_slot_pointer(i, tuples_in_segment);
+            }else {
+                uint64_t previous_slot_pointer = get_slot_pointer((i-1));
+                set_slot_pointer(i, (previous_slot_pointer + tuples_in_segment));
+            }    
+        }
     }
 
     // Depending on how I implement the resize, this might be useful, but probably not 
@@ -255,7 +270,7 @@ public: // External Operations:
             grow_directory();
         }
 
-        // 1. Iterate over every Row (Tuple)
+        // I need to add the max 4 per slot limit again. I have only added the load factor limit as of now
         for (size_t row_idx = 0; row_idx < build_side_table.size(); ++row_idx) {
             
             // Get the key
@@ -265,9 +280,14 @@ public: // External Operations:
             uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
             uint64_t slot_in_directory = get_slot(hashed_key);
             directory[slot_in_directory]++;
+            if (needs_directory_rehash(directory[slot_in_directory]))
+            {
+                double_directory();
+                row_idx = -1;
+            }
         }
 
-        // build array. gia kathe arithmo 
+        build_data_array();
     }
 
     void insert(const Key& key, const Value& value){
