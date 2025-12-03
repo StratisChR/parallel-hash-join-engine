@@ -77,19 +77,9 @@ public:
         
         // We initialize the directory with 2^(64-shift) entries.
         // At first all are zeroed.
-        size_t capacity = 1ULL << (64 - shift);
+        this->capacity = 1ULL << (64 - shift);
         directory.resize(capacity, 0);  
         
-        // // Initialize data array
-        // capacity = 2048;  // Start with some initial capacity
-        // data.resize(capacity);  // ← Changed from reserve() to resize()
-    
-        // // Mark all slots as empty
-        // for(auto& pair : data) {
-        //     pair.first = EMPTY_KEY;  // Assuming you define EMPTY_KEY
-        //     pair.second = 0;
-        // }
-
         // Precompute Bloom filter tags
         precompute_bloom_tags();
     }
@@ -109,12 +99,11 @@ private: // Utilities:
 
     void set_slot_pointer(uint64_t directory_slot, uint64_t array_index){
         directory[directory_slot] = array_index << 16;
+        return;
     }
 
     uint64_t get_slot_pointer(uint64_t slot) {
-        uint64_t entry = get_entry(slot);
-        uint64_t pointer = (entry & POINTER_MASK) >> 16;
-        return pointer;
+        return directory[slot] >> 16;
     }
 
     uint16_t get_slot_filter(uint64_t slot) {
@@ -136,13 +125,14 @@ private: // Utilities:
         return get_slot_pointer(slot) - get_slot_pointer(slot - 1);
     }
 
+    // could use it for testing but nothing more than that.
     double get_load_factor() const {
         return static_cast<double>(num_elements) / static_cast<double>(capacity);
     }
 
-    bool needs_array_rehash() const {
-        return get_load_factor() > MAX_LOAD_FACTOR;
-    }
+    // bool needs_array_rehash() const {
+    //     return get_load_factor() > MAX_LOAD_FACTOR;
+    // }
 
     bool needs_directory_rehash(uint64_t entry) const{
         return entry > MAX_TUPLES_PER_SEGMENT;
@@ -178,6 +168,9 @@ private: // Utilities:
         //    Since we might have changed the shift, the real capacity is:
         uint64_t final_capacity = 1ULL << (64 - shift);
         capacity = static_cast<size_t>(final_capacity);
+
+        this->shift = shift;
+        this->capacity = capacity;
     }
 
 private: // Everything related to rehashing/resizing:
@@ -220,9 +213,9 @@ private: // Everything related to rehashing/resizing:
         }
     }
 
-    // Depending on how I implement the resize, this might be useful, but probably not 
-    // since each insert already updates the bloom filter.
-    void rebuild_bloom_for_slot(u64 slot);
+    // // Depending on how I implement the resize, this might be useful, but probably not 
+    // // since each insert already updates the bloom filter.
+    // void rebuild_bloom_for_slot(u64 slot);
 
 private: // Support for the external operations:
 
@@ -255,6 +248,8 @@ private: // Support for the external operations:
 
 public: // External Operations:
 
+    // I might make the for loop in create_directory its own function. And also add the column store version.
+
     // The following function is called at the start of each join call. 
     // It is used to build the directory that will be used for the hash table when joining
     // the build and probe sides. 
@@ -264,32 +259,38 @@ public: // External Operations:
     void create_directory(std::vector<std::vector<value_t>>& build_side_table, size_t key_column){
         num_elements = build_side_table.size();
         calc_capacity();
-        if (capacity == 2024){
-            continue;
+        if (capacity == 2048){
+            
         }else{
             grow_directory();
         }
 
         // I need to add the max 4 per slot limit again. I have only added the load factor limit as of now
-        for (size_t row_idx = 0; row_idx < build_side_table.size(); ++row_idx) {
-            
-            // Get the key
-            const std::vector<value_t>& row = build_side_table[row_idx];
-            int32_t key = row[key_column];
 
-            uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
-            uint64_t slot_in_directory = get_slot(hashed_key);
-            directory[slot_in_directory]++;
-            if (needs_directory_rehash(directory[slot_in_directory]))
-            {
-                double_directory();
-                row_idx = -1;
+        bool start_again = true;
+        while(start_again){
+            start_again = false;
+            for (size_t row_idx = 0; row_idx < build_side_table.size(); ++row_idx) {
+                
+                // Get the key
+                const std::vector<value_t>& row = build_side_table[row_idx];
+                int32_t key = row[key_column];
+
+                uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
+                uint64_t slot_in_directory = get_slot(hashed_key);
+                directory[slot_in_directory]++;
+                if (needs_directory_rehash(directory[slot_in_directory]))
+                {
+                    double_directory();
+                    start_again = true;
+                    break;
+                }
             }
         }
-
         build_data_array();
     }
 
+    // Might call it emplace to make simple drop in for execute.cpp possible
     void insert(const Key& key, const Value& value){
         uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
         uint64_t position = find_insert_position(hashed_key);
@@ -301,13 +302,38 @@ public: // External Operations:
         data[position] = {key, value};
 
         update_bloom_filter(hashed_key);
-
-        num_elements++;
     }
 
-    // lookup has access to both the key and the hash value,
-    // so that it can call compute matches.
-    void lookup(Key key, uint64_t hash);
+    // lookup can call produce matches.
+    // It returns a pointer to our values, not our actual values.
+    auto* lookup(Key key){
+        uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
+        uint64_t slot = get_slot(hashed_key);
+        uint64_t entry = get_entry(slot);
+        uint16_t filter = static_cast<uint16_t>(entry);
+        if(!could_contain(filter, hashed_key)){
+            return nullptr;
+        }
+        return produce_matches(key, slot, entry);
+    }
     
-    void produce_matches(Key key, uint64_t slot, uint64_t entry);
+    auto* produce_matches(Key key, uint64_t slot, uint64_t entry){
+        uint64_t start;
+        if (slot == 0)
+        {
+            start = 0;
+        }else{
+            start = get_slot_pointer(slot-1);
+        }
+        uint64_t end = entry >> 16;
+
+        for (uint64_t array_index = start; array_index < end; array_index++)
+        {
+            if (data[array_index].first == key)
+            {
+                return &data[array_index];
+            }  
+        }
+        return nullptr;
+    }
 }

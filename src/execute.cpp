@@ -178,7 +178,11 @@ struct JoinAlgorithm {
                 if constexpr (std::is_same_v<T, int32_t>) {
                     if (cell.type != value_t::Type::INT32) continue;
                     auto key = static_cast<T>(cell.i32);
+
+                    // checks if key is null. I can return a POINTER to a pair here and it will work fine.
+                    // I'll just have to change the checks.
                     if (auto itr = hash_table.find(key); itr != hash_table.end()) {
+                        // loop for all rows stored inside the "value" row in the hash table
                         for (auto left_idx: itr->second) {
                             auto& left_record = left[left_idx];
                             std::vector<value_t> new_record;
@@ -194,6 +198,7 @@ struct JoinAlgorithm {
                             results.emplace_back(std::move(new_record));
                         }
                     }
+
                 } else if constexpr (std::is_same_v<T, std::string>) {
                     if (cell.type != value_t::Type::STRING) continue;
                     auto key = materialize_string(cell);
@@ -628,6 +633,9 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         auto& j = std::get<JoinNode>(root_node.data);
         return execute_hash_join_root(plan, j, root_node.output_attrs);
     }
+
+    // Οτιδήποτε υπάρχει από εδώ και μετά μπορεί να φύγει.
+    std::abort();
 
     // otherwise fall back to executing the plan and converting the row-store
     // result  into a ColumnarTable 
