@@ -15,13 +15,13 @@ inline uint32_t crc32_64(uint32_t seed, uint64_t value) {
     return _mm_crc32_u64(seed, value);
 }
 
-uint64_t hash32(uint32_t key, uint32_t seed) {
+inline uint64_t hash32(uint32_t key, uint32_t seed) {
     uint64_t k = 0x8648DBDBULL;
     uint32_t crc = crc32(seed, key);
     return crc* ((k << 32) + 1);
 }
 
-uint64_t hash64(uint64_t key, uint32_t seed1, uint32_t seed2) {
+inline uint64_t hash64(uint64_t key, uint32_t seed1, uint32_t seed2) {
     uint64_t k = 0x2545F4914F6CDD1DULL;
     uint32_t crc1 = crc32(seed1, key);
     uint32_t crc2 = crc32(seed2, key);
