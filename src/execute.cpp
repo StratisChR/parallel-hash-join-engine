@@ -530,42 +530,44 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
 
     auto& root_node = plan.nodes[plan.root];
-    if (std::holds_alternative<JoinNode>(root_node.data)) {
-        auto& j = std::get<JoinNode>(root_node.data);
-        return execute_hash_join_root(plan, j, root_node.output_attrs);
-    }
+    auto& j = std::get<JoinNode>(root_node.data);
+    return execute_hash_join_root(plan, j, root_node.output_attrs);
+    // if (std::holds_alternative<JoinNode>(root_node.data)) {
+    //     auto& j = std::get<JoinNode>(root_node.data);
+    //     return execute_hash_join_root(plan, j, root_node.output_attrs);
+    // }
+    // // fallback for Scans/Filters
+    // auto ret = execute_impl(plan, plan.root);
+    // auto ret_types = plan.nodes[plan.root].output_attrs
+    //                | views::transform([](const auto& v) { return std::get<1>(v); })
+    //                | ranges::to<std::vector<DataType>>();
 
-    // fallback for Scans/Filters
-    auto ret = execute_impl(plan, plan.root);
-    auto ret_types = plan.nodes[plan.root].output_attrs
-                   | views::transform([](const auto& v) { return std::get<1>(v); })
-                   | ranges::to<std::vector<DataType>>();
+    // size_t num_rows = ret.empty() ? 0 : ret[0].size();
+    // std::vector<std::vector<Data>> converted(num_rows);
+    // for(auto& r : converted) r.resize(ret.size());
 
-    size_t num_rows = ret.empty() ? 0 : ret[0].size();
-    std::vector<std::vector<Data>> converted(num_rows);
-    for(auto& r : converted) r.resize(ret.size());
+    // for (size_t col_idx = 0; col_idx < ret.size(); ++col_idx) {
+    //     auto& column = ret[col_idx];
+    //     DataType dtype = ret_types[col_idx];
+    //     size_t row_idx = 0;
+    //     for (const auto& page_ptr : column.pages) {
+    //         size_t limit = (row_idx + PAGE_CAPACITY > num_rows) ? num_rows - row_idx : PAGE_CAPACITY;
+    //         for (size_t i = 0; i < limit; ++i) {
+    //             value_t vv = page_ptr->data[i];
+    //             if (dtype == DataType::INT32) {
+    //                 if (!vv.is_null() && vv.type == value_t::Type::INT32) converted[row_idx + i][col_idx] = Data(static_cast<int32_t>(vv.i32));
+    //                 else converted[row_idx + i][col_idx] = Data(std::monostate{});
+    //             } else {
+    //                 if (!vv.is_null() && vv.type == value_t::Type::STRING) converted[row_idx + i][col_idx] = Data(materialize_string_from_value(plan, vv));
+    //                 else converted[row_idx + i][col_idx] = Data(std::monostate{});
+    //             }
+    //         }
+    //         row_idx += limit;
+    //     }
+    // }
+    // Table table{std::move(converted), std::move(ret_types)};
+    // return table.to_columnar();
 
-    for (size_t col_idx = 0; col_idx < ret.size(); ++col_idx) {
-        auto& column = ret[col_idx];
-        DataType dtype = ret_types[col_idx];
-        size_t row_idx = 0;
-        for (const auto& page_ptr : column.pages) {
-            size_t limit = (row_idx + PAGE_CAPACITY > num_rows) ? num_rows - row_idx : PAGE_CAPACITY;
-            for (size_t i = 0; i < limit; ++i) {
-                value_t vv = page_ptr->data[i];
-                if (dtype == DataType::INT32) {
-                    if (!vv.is_null() && vv.type == value_t::Type::INT32) converted[row_idx + i][col_idx] = Data(static_cast<int32_t>(vv.i32));
-                    else converted[row_idx + i][col_idx] = Data(std::monostate{});
-                } else {
-                    if (!vv.is_null() && vv.type == value_t::Type::STRING) converted[row_idx + i][col_idx] = Data(materialize_string_from_value(plan, vv));
-                    else converted[row_idx + i][col_idx] = Data(std::monostate{});
-                }
-            }
-            row_idx += limit;
-        }
-    }
-    Table table{std::move(converted), std::move(ret_types)};
-    return table.to_columnar();
 }
 
 void* build_context() { return nullptr; }

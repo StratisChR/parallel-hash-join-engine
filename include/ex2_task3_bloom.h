@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include "ex2_task3_hashes.h"
 
 inline std::array<uint16_t, 2048> bloom_tags = {};
