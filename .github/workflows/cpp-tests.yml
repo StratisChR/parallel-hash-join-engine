@@ -22,9 +22,11 @@ jobs:
       run: |
            cmake --build build -- -j$(nproc) test_algorithms
            cmake --build build -- -j$(nproc) test_indexing
+           cmake --build build -- -j$(nproc) ex2_task3_hashes_tests
 
     - name: Run tests
       working-directory: build
       run: |
        ./test_algorithms 
        ./test_indexing
+       ./ex2_task3_hashes_tests
