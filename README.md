@@ -3,7 +3,18 @@
 [removed] - [removed] - [removed]  
 Χαρισιάδης Ρούσσης Στρατής - [removed] - [removed]  
 
-# Ανάλυση Απόδοσης
+# Part 2
+Για να τρέξετε τα tests:  
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+cmake --build build --target ex2_task3_hashes_tests -- -j $(nproc)
+./build/ex2_task3_hashes_tests
+```
+  
+
+# Part 1
+
+## Ανάλυση Απόδοσης
 Τα παρακάτω αποτελέσματα είναι από μηχάνημα με 16GB RAM το οποίο τρέχει αποκλειστικά Linux.  
 Hopscotch Hash: 5 - 7.5 % Βελτίωση  
 Robinhood Hash: 1 - 3 % Βελτίωση  
@@ -15,14 +26,14 @@ Hopscotch: 210688 ms
 Robinhood: 223036 ms  
 Cuckoo: 238929 ms  
   
-# Διαμοιρασμός Εργασιών εντός ομάδας  
+## Διαμοιρασμός Εργασιών εντός ομάδας  
   
 Αναλάβαμε ο καθένας από έναν αλγόριθμο, συγκεκριμένα:  
 [removed] - Robinhood  
 [removed] - Hopscotch  
 Χαρισιάδης Ρούσσης Στρατής - Cuckoo  
 
-# Σημείωση  
+## Σημείωση  
 
 Για να αλλάξουμε τον αλγόριθμο με τον οποίο τρέχει το πρόγραμμα δεν χρησιμοποιούμε command line arguments,
 προτιμήσαμε να θέσουμε μία μεταβλητή εντός του execute.cpp, την JoinStrategy, η οποία παίρνει 4

@@ -56,7 +56,7 @@ struct value_t {
 
 
 
-constexpr size_t PAGE_CAPACITY = 8192;
+constexpr size_t PAGE_CAPACITY = 4096;
 
 struct ColPage {
     value_t data[PAGE_CAPACITY];

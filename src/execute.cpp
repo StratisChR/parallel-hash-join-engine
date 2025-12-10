@@ -10,14 +10,15 @@
 #include "int_hasher.h"
 #include <stdexcept>
 #include <variant>
+#include "ex2_task3_hashmap.h"
 
 namespace Contest {
 
 enum class JoinStrategy {
     STD_UNORDERED_MAP, 
-    HOPSCOTCH,         
-    ROBIN_HOOD,         
-    CUCKOO             
+    HOPSCOTCH,         // Panagiotis Papapostolou
+    ROBIN_HOOD,        // Theodoros Mpeioglou
+    CUCKOO             // Stratis Charisiadis-Roussis
 };
 
 // Choose join strategy here
@@ -100,9 +101,12 @@ struct JoinAlgorithm {
             }
         };
 
-        auto hash_table = create_hash_table();
+        // auto hash_table = create_hash_table();
+        auto hash_table = UnchainedHashMap<T, std::vector<size_t>>();
 
         if (build_left) {
+            hash_table.create_directory(left, left_col);
+
             //build left
             auto& key_col_obj = left[left_col];
             size_t total_rows = key_col_obj.size();
@@ -122,16 +126,19 @@ struct JoinAlgorithm {
                     if constexpr (std::is_same_v<T, int32_t>) {
                         if (cell.type != value_t::Type::INT32) throw std::runtime_error("wrong type");
                         key = static_cast<T>(cell.i32);
-                    } else {
-                        if (cell.type != value_t::Type::STRING) throw std::runtime_error("wrong type");
-                        key = materialize_string(cell);
-                    }
+                    } 
+                    // else {
+                    //     if (cell.type != value_t::Type::STRING) throw std::runtime_error("wrong type");
+                    //     key = materialize_string(cell);
+                    // }
 
-                    if (auto itr = hash_table.find(key); itr == hash_table.end()) {
-                        hash_table.emplace(key, std::vector<size_t>(1, idx));
-                    } else {
-                        itr->second.push_back(idx);
-                    }
+
+                    hash_table.insert(key, std::vector<size_t>(1, idx));
+                    // if (auto itr = hash_table.find(key); itr == hash_table.end()) {
+                    //     hash_table.emplace(key, std::vector<size_t>(1, idx));
+                    // } else {
+                    //     itr->second.push_back(idx);
+                    // }
                 }
                 global_idx += limit;
             }
@@ -152,14 +159,14 @@ struct JoinAlgorithm {
                     if (cell.is_null()) continue;
                     bool type_ok = true;
                     if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
-                    else type_ok = (cell.type == value_t::Type::STRING);
+                    // else type_ok = (cell.type == value_t::Type::STRING);
                     if (!type_ok) continue;
 
                     T key;
                     if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
-                    else key = materialize_string(cell);
+                    // else key = materialize_string(cell);
 
-                    if (auto itr = hash_table.find(key); itr != hash_table.end()) {
+                    if (auto* itr = hash_table.lookup(key); itr != nullptr) {
                         for (auto left_idx : itr->second) {
                             // Construct Result (Column Store)
                             size_t left_table_cols = left.size();
@@ -177,6 +184,7 @@ struct JoinAlgorithm {
                 global_idx += limit;
             }
         } else {
+            hash_table.create_directory(right, right_col);
             // build right
             auto& key_col_obj = right[right_col];
             size_t total_rows = key_col_obj.size();
@@ -195,16 +203,18 @@ struct JoinAlgorithm {
                     if constexpr (std::is_same_v<T, int32_t>) {
                         if (cell.type != value_t::Type::INT32) throw std::runtime_error("wrong type");
                         key = static_cast<T>(cell.i32);
-                    } else {
-                        if (cell.type != value_t::Type::STRING) throw std::runtime_error("wrong type");
-                        key = materialize_string(cell);
-                    }
+                    } 
+                    // else {
+                    //     if (cell.type != value_t::Type::STRING) throw std::runtime_error("wrong type");
+                    //     key = materialize_string(cell);
+                    // }
 
-                    if (auto itr = hash_table.find(key); itr == hash_table.end()) {
-                        hash_table.emplace(key, std::vector<size_t>(1, idx));
-                    } else {
-                        itr->second.push_back(idx);
-                    }
+                    hash_table.insert(key, std::vector<size_t>(1, idx));
+                    // if (auto itr = hash_table.find(key); itr == hash_table.end()) {
+                    //     hash_table.emplace(key, std::vector<size_t>(1, idx));
+                    // } else {
+                    //     itr->second.push_back(idx);
+                    // }
                 }
                 global_idx += limit;
             }
@@ -225,14 +235,14 @@ struct JoinAlgorithm {
                     if (cell.is_null()) continue;
                     bool type_ok = true;
                     if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
-                    else type_ok = (cell.type == value_t::Type::STRING);
+                    // else type_ok = (cell.type == value_t::Type::STRING);
                     if (!type_ok) continue;
 
                     T key;
                     if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
-                    else key = materialize_string(cell);
+                    // else key = materialize_string(cell);
 
-                    if (auto itr = hash_table.find(key); itr != hash_table.end()) {
+                    if (auto* itr = hash_table.lookup(key); itr != nullptr) {
                         for (auto right_idx : itr->second) {
                             size_t left_table_cols = left.size();
                             for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
@@ -288,13 +298,13 @@ ExecuteResult execute_hash_join(const Plan& plan,
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
             case DataType::INT32:   join_algorithm.run<int32_t, IntHasher>(); break;
-            case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
+            // case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
             default: throw std::runtime_error("unsupported join key type");
         }
     } else {
         switch (std::get<1>(right_types[join.right_attr])) {
             case DataType::INT32:   join_algorithm.run<int32_t, IntHasher>(); break;
-            case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
+            // case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
             default: throw std::runtime_error("unsupported join key type");
         }
     }
@@ -325,7 +335,8 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
             else if constexpr (CURRENT_STRATEGY == JoinStrategy::CUCKOO) return CuckooHashMap<T, std::vector<size_t>, HasherT>();
             else return std::unordered_map<T, std::vector<size_t>>();
         };
-        auto hash_table = create_hash_table(); 
+        // auto hash_table = create_hash_table(); 
+        auto hash_table = UnchainedHashMap<T, std::vector<size_t>>();
 
         // build
         ExecuteResult& build_table = join.build_left ? left : right;
@@ -335,6 +346,8 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
         size_t total_rows = build_column.size();
         size_t global_idx = 0;
 
+        hash_table.create_directory(build_table, build_col_idx);
+
         for (const auto& page_ptr : build_column.pages) {
             value_t* data = page_ptr->data;
             size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
@@ -343,13 +356,14 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                 if (cell.is_null()) continue;
                 T key;
                 if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
-                else key = materialize_string_from_value(plan, cell);
+                // else key = materialize_string_from_value(plan, cell);
                 
-                if (auto it = hash_table.find(key); it == hash_table.end()) {
-                    hash_table.emplace(key, std::vector<size_t>{global_idx + i});
-                } else {
-                    it->second.push_back(global_idx + i);
-                }
+                hash_table.insert(key, std::vector<size_t>{global_idx + i});
+                // if (auto it = hash_table.find(key); it == hash_table.end()) {
+                //     hash_table.emplace(key, std::vector<size_t>{global_idx + i});
+                // } else {
+                //     it->second.push_back(global_idx + i);
+                // }
             }
             global_idx += limit;
         }
@@ -375,9 +389,10 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
 
                 T key;
                 if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
-                else key = materialize_string_from_value(plan, cell);
+                // else key = materialize_string_from_value(plan, cell);
 
-                if (auto it = hash_table.find(key); it != hash_table.end()) {
+                // if (auto it = hash_table.find(key); it != hash_table.end()) {
+                if (auto* it = hash_table.lookup(key); it != nullptr) {
                     for (auto build_idx : it->second) {
                         size_t current_probe_idx = global_idx + i;
                         size_t left_idx  = join.build_left ? build_idx : current_probe_idx;
@@ -413,7 +428,7 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                                         : std::get<1>(right_types[join.right_attr]);
 
     if (key_type == DataType::INT32) run_root_join(IntTag{}, IntHasherTag{});
-    else run_root_join(StrTag{}, StrHasherTag{});
+    // else run_root_join(StrTag{}, StrHasherTag{});
 
     // Transpose to Rows
     size_t num_out_rows = final_columns.empty() ? 0 : final_columns[0].size();
@@ -515,42 +530,44 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
 
     auto& root_node = plan.nodes[plan.root];
-    if (std::holds_alternative<JoinNode>(root_node.data)) {
-        auto& j = std::get<JoinNode>(root_node.data);
-        return execute_hash_join_root(plan, j, root_node.output_attrs);
-    }
+    auto& j = std::get<JoinNode>(root_node.data);
+    return execute_hash_join_root(plan, j, root_node.output_attrs);
+    // if (std::holds_alternative<JoinNode>(root_node.data)) {
+    //     auto& j = std::get<JoinNode>(root_node.data);
+    //     return execute_hash_join_root(plan, j, root_node.output_attrs);
+    // }
+    // // fallback for Scans/Filters
+    // auto ret = execute_impl(plan, plan.root);
+    // auto ret_types = plan.nodes[plan.root].output_attrs
+    //                | views::transform([](const auto& v) { return std::get<1>(v); })
+    //                | ranges::to<std::vector<DataType>>();
 
-    // fallback for Scans/Filters
-    auto ret = execute_impl(plan, plan.root);
-    auto ret_types = plan.nodes[plan.root].output_attrs
-                   | views::transform([](const auto& v) { return std::get<1>(v); })
-                   | ranges::to<std::vector<DataType>>();
+    // size_t num_rows = ret.empty() ? 0 : ret[0].size();
+    // std::vector<std::vector<Data>> converted(num_rows);
+    // for(auto& r : converted) r.resize(ret.size());
 
-    size_t num_rows = ret.empty() ? 0 : ret[0].size();
-    std::vector<std::vector<Data>> converted(num_rows);
-    for(auto& r : converted) r.resize(ret.size());
+    // for (size_t col_idx = 0; col_idx < ret.size(); ++col_idx) {
+    //     auto& column = ret[col_idx];
+    //     DataType dtype = ret_types[col_idx];
+    //     size_t row_idx = 0;
+    //     for (const auto& page_ptr : column.pages) {
+    //         size_t limit = (row_idx + PAGE_CAPACITY > num_rows) ? num_rows - row_idx : PAGE_CAPACITY;
+    //         for (size_t i = 0; i < limit; ++i) {
+    //             value_t vv = page_ptr->data[i];
+    //             if (dtype == DataType::INT32) {
+    //                 if (!vv.is_null() && vv.type == value_t::Type::INT32) converted[row_idx + i][col_idx] = Data(static_cast<int32_t>(vv.i32));
+    //                 else converted[row_idx + i][col_idx] = Data(std::monostate{});
+    //             } else {
+    //                 if (!vv.is_null() && vv.type == value_t::Type::STRING) converted[row_idx + i][col_idx] = Data(materialize_string_from_value(plan, vv));
+    //                 else converted[row_idx + i][col_idx] = Data(std::monostate{});
+    //             }
+    //         }
+    //         row_idx += limit;
+    //     }
+    // }
+    // Table table{std::move(converted), std::move(ret_types)};
+    // return table.to_columnar();
 
-    for (size_t col_idx = 0; col_idx < ret.size(); ++col_idx) {
-        auto& column = ret[col_idx];
-        DataType dtype = ret_types[col_idx];
-        size_t row_idx = 0;
-        for (const auto& page_ptr : column.pages) {
-            size_t limit = (row_idx + PAGE_CAPACITY > num_rows) ? num_rows - row_idx : PAGE_CAPACITY;
-            for (size_t i = 0; i < limit; ++i) {
-                value_t vv = page_ptr->data[i];
-                if (dtype == DataType::INT32) {
-                    if (!vv.is_null() && vv.type == value_t::Type::INT32) converted[row_idx + i][col_idx] = Data(static_cast<int32_t>(vv.i32));
-                    else converted[row_idx + i][col_idx] = Data(std::monostate{});
-                } else {
-                    if (!vv.is_null() && vv.type == value_t::Type::STRING) converted[row_idx + i][col_idx] = Data(materialize_string_from_value(plan, vv));
-                    else converted[row_idx + i][col_idx] = Data(std::monostate{});
-                }
-            }
-            row_idx += limit;
-        }
-    }
-    Table table{std::move(converted), std::move(ret_types)};
-    return table.to_columnar();
 }
 
 void* build_context() { return nullptr; }

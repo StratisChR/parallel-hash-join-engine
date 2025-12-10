@@ -92,6 +92,7 @@ add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(test_algorithms ${SIGMODPC_SRC} tests/test_hopscotch.cpp tests/hash_unit_tests.cpp tests/cuckoo_tests.cpp)
 add_executable(test_indexing ${SIGMODPC_SRC} tests/test_indexing.cpp)
 add_executable(build_database tests/build_database.cpp)
+add_executable(ex2_task3_hashes_tests ${SIGMODPC_SRC} tests/ex2_task3_hashes_tests.cpp tests/ex2_task3_hashmap_test.cpp)
 
 # For all executables
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -100,6 +101,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(test_algorithms PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(test_indexing PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(ex2_task3_hashes_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -119,12 +121,14 @@ target_link_libraries(build_database PRIVATE fmt duckdb)
 target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 target_link_libraries(test_algorithms PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 target_link_libraries(test_indexing PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
+target_link_libraries(ex2_task3_hashes_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 
 target_include_directories(run PRIVATE include)
 target_include_directories(build_database PRIVATE include)
 target_include_directories(unit_tests PRIVATE include)
 target_include_directories(test_algorithms PRIVATE include)
 target_include_directories(test_indexing PRIVATE include)
+target_include_directories(ex2_task3_hashes_tests PRIVATE include)
 
 
 
