@@ -12,7 +12,7 @@ inline std::array<uint16_t, 2048> bloom_tags = {};
 // Therefore, we simply take 4 different parts, and simply work 
 // with those to set our bits.
 
-uint16_t compute_bloom_bits_separately(uint64_t hash){
+inline uint16_t compute_bloom_bits_separately(uint64_t hash){
     
     uint16_t bit1 = (hash >> 0) & 0xF;   // bits 0-3
     uint16_t bit2 = (hash >> 16) & 0xF;  // bits 16-19

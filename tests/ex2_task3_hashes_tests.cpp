@@ -62,7 +62,7 @@ TEST_CASE("Hash32 has good distribution", "[hash]") {
 
 // THe following tests are used to benchmark the hash functions.
 // Basically we just call hashes repeatedly and measure the time taken.
-// The results are basically:
+// The results are:
 // hash32: ~1.63 ns
 // hash64: ~1.67 ns
 // So, ~600 million hashes per second per core.

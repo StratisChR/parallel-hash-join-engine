@@ -253,34 +253,55 @@ public: // External Operations:
     // the number stored inside directory[prefix], which has 2^(64-shift) slots and all are initialized to 0.
 
     // updated to keep only unique keys
-    void create_directory(std::vector<std::vector<value_t>>& build_side_table, size_t key_column){
+    void create_directory(std::vector<column_t>& build_side_table, size_t key_column){
+        size_t total_rows = build_side_table[key_column].size();
         // Count unique keys first
-        std::unordered_set<int32_t> unique_keys;
-        unique_keys.reserve(build_side_table.size());
+        std::vector<Key> unique_keys;
+        unique_keys.reserve(total_rows);
 
-        for (const auto& row : build_side_table) {
-            unique_keys.insert(row[key_column].i32);
+        size_t global_idx = 0;
+        for (const auto& page_ptr : build_side_table[key_column].pages){
+            value_t* data = page_ptr->data;
+            size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
+
+            for (size_t i = 0; i < limit; ++i) {
+                const value_t& cell = data[i];
+
+                if (cell.type == value_t::Type::INT32) {
+                unique_keys.push_back(cell.i32);
+                }  
+            } 
+            global_idx += limit;
         }
         
-        num_elements = unique_keys.size();  // Use unique key count!
+        if (!unique_keys.empty()) {
+            std::sort(unique_keys.begin(), unique_keys.end());
+            auto last = std::unique(unique_keys.begin(), unique_keys.end());
+            unique_keys.erase(last, unique_keys.end());
+        }
+        // for (const auto& row : build_side_table) {
+        //     unique_keys.insert(row[key_column].i32);
+        // }
+        
+        num_elements = unique_keys.size();  
         calc_capacity();
         if (capacity != 2048){
             grow_directory();
+        }
+
+        // Computing hashes to save time.
+        std::vector<std::pair<uint64_t, Key>> hashed_keys;
+        hashed_keys.reserve(unique_keys.size());
+
+        for (const auto& key : unique_keys) {
+            // Only pay the cost of hash32 once per key.
+            hashed_keys.emplace_back(hash32(static_cast<uint32_t>(key), 0), key);
         }
 
         bool start_again = true;
         while(start_again){
             start_again = false;
             std::fill(directory.begin(), directory.end(), 0);
-
-            // Pre-hash all keys once
-            std::vector<std::pair<uint64_t, int32_t>> hashed_keys;
-            hashed_keys.reserve(unique_keys.size());
-            
-            for (const auto& key : unique_keys) {
-                uint64_t hashed = hash32(static_cast<uint32_t>(key), 0);
-                hashed_keys.emplace_back(hashed, key);
-            }
 
             for (const auto& [hashed, _] : hashed_keys) {
                 uint64_t slot = get_slot(hashed);
