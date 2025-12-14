@@ -9,8 +9,21 @@
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 cmake --build build --target ex2_task3_hashes_tests -- -j $(nproc)
 ./build/ex2_task3_hashes_tests
+cmake --build build --target test_indexing -- -j $(nproc)
+./build/test_indexing
 ```
-  
+## Ανάλυση Απόδοσης
+Τα παρακάτω αποτελέσματα είναι από μηχάνημα με 16GB RAM το οποίο τρέχει αποκλειστικά Linux.  
+Ο αρχικός χρόνος ήταν περίπου στα 240s. Με τα 3 υποερωτήματα παρατηρήσαμε τις εξής βελτιώσεις:  
+Task 1: ~140s, 42% βελτίωση.
+Task 2: 50-55s, ~80% βελτίωση.
+Task 3: Καμία Διαφορά.
+
+## Διαμοιρασμός Εργασιών εντός ομάδας  
+Αναλάβαμε ο καθένας από έναν αλγόριθμο, συγκεκριμένα: 
+[removed] - Task 1
+[removed] - Task 2  
+Χαρισιάδης Ρούσσης Στρατής - Task 3  
 
 # Part 1
 
