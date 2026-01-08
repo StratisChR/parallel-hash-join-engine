@@ -259,19 +259,11 @@ public: // External Operations:
         std::vector<Key> unique_keys;
         unique_keys.reserve(total_rows);
 
-        size_t global_idx = 0;
-        for (const auto& page_ptr : build_side_table[key_column].pages){
-            value_t* data = page_ptr->data;
-            size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
-
-            for (size_t i = 0; i < limit; ++i) {
-                const value_t& cell = data[i];
-
-                if (cell.type == value_t::Type::INT32) {
+        for (size_t idx = 0; idx < total_rows; ++idx) {
+            const value_t& cell = build_side_table[key_column][idx];
+            if (cell.type == value_t::Type::INT32) {
                 unique_keys.push_back(cell.i32);
-                }  
-            } 
-            global_idx += limit;
+            }
         }
         
         if (!unique_keys.empty()) {
