@@ -204,7 +204,7 @@ public: // External Operations:
         num_elements = total_rows; 
         calc_capacity();
         
-        std::fill(directory.begin(), directory.end(), 0);
+        directory.assign(capacity, 0);
 
         // I might precompute all hashes first to speed up the process.
 

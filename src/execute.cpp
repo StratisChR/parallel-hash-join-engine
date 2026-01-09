@@ -82,145 +82,66 @@ struct JoinAlgorithm {
         return materialize_string_from_value(*plan_ptr, vv);
     }
 
-    template <class T, class HasherT>
+    template <class T>
     auto run() {
         namespace views = ranges::views;
 
-        auto create_hash_table = [&]() {
-            if constexpr (CURRENT_STRATEGY == JoinStrategy::ROBIN_HOOD) {
-                return RobinHoodHashMap<T, std::vector<size_t>, HasherT>();
-            } 
-            else if constexpr (CURRENT_STRATEGY == JoinStrategy::HOPSCOTCH) {
-                return HopscotchHash<T, std::vector<size_t>>();
-            }
-            else if constexpr (CURRENT_STRATEGY == JoinStrategy::CUCKOO) {
-                return CuckooHashMap<T, std::vector<size_t>, HasherT>();
-            }
-            else {
-                return std::unordered_map<T, std::vector<size_t>>();
-            }
-        };
+        UnchainedHashMap<T, size_t> hash_table;
 
-        // auto hash_table = create_hash_table();
-        auto hash_table = UnchainedHashMap<T, std::vector<size_t>>();
-
-        // build / probe depending on build_left flag
+        // Build side:
         if (build_left) {
+            // "create_directory" replaces the manual insert loop
             hash_table.create_directory(left, left_col);
-            //build left
-            auto& key_col_obj = left[left_col];
-            size_t total_rows = key_col_obj.size();
-
-            for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY) {
-                size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
-                for (size_t i = 0; i < limit; ++i) {
-                    size_t idx = global_idx + i;
-                    value_t cell = key_col_obj[idx];
-                    if (cell.is_null()) continue;
-
-                    T key;
-                    if constexpr (std::is_same_v<T, int32_t>) {
-                        if (cell.type != value_t::Type::INT32) throw std::runtime_error("wrong type");
-                        key = static_cast<T>(cell.i32);
-                    }
-
-                    hash_table.insert(key, std::vector<size_t>(1, idx));
-                }
-            }
-
-            // probe right
-            auto& probe_col_obj = right[right_col];
-            total_rows = probe_col_obj.size();
-
-            for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY) {
-                size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
-                for (size_t i = 0; i < limit; ++i) {
-                    size_t right_idx_val = global_idx + i;
-                    value_t cell = probe_col_obj[right_idx_val];
-
-                    if (cell.is_null()) continue;
-                    bool type_ok = true;
-                    if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
-                    if (!type_ok) continue;
-
-                    T key;
-                    if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
-
-                    if (auto* itr = hash_table.lookup(key); itr != nullptr) {
-                        for (auto left_idx : itr->second) {
-                            // Construct Result (Column Store)
-                            size_t left_table_cols = left.size();
-                            for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
-                                auto [src_col, _] = output_attrs[out_i];
-                                if (src_col < left_table_cols) {
-                                    results[out_i].push_back(left[src_col][left_idx]);
-                                } else {
-                                    results[out_i].push_back(right[src_col - left_table_cols][right_idx_val]);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         } else {
             hash_table.create_directory(right, right_col);
-            // build right
-            auto& key_col_obj = right[right_col];
-            size_t total_rows = key_col_obj.size();
-            size_t global_idx = 0;
+        }
 
-            for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY) {
-                size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
-                for (size_t i = 0; i < limit; ++i) {
-                    size_t idx = global_idx + i;
-                    value_t cell = key_col_obj[idx];
-                    if (cell.is_null()) continue;
+        // We don't need to have two versions for left or right.
+        ExecuteResult& probe_table = build_left ? right : left;
+        size_t probe_col_idx       = build_left ? right_col : left_col;
 
-                    T key;
-                    if constexpr (std::is_same_v<T, int32_t>) {
-                        if (cell.type != value_t::Type::INT32) throw std::runtime_error("wrong type");
-                        key = static_cast<T>(cell.i32);
-                    }
+        // We store the tables per columns, so 
+        auto& probe_col_obj = probe_table[probe_col_idx];
+        size_t total_rows = probe_col_obj.size();
+        size_t left_table_cols = left.size();
 
-                    hash_table.insert(key, std::vector<size_t>(1, idx));
-                }
-            }
+        for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY)
+        {
+            size_t limit = std::min(PAGE_CAPACITY, total_rows - global_idx);
+            for (size_t i = 0; i < limit; ++i)
+            {
+                size_t current_probe_idx = global_idx + i;
+                value_t cell = probe_col_obj[current_probe_idx];
+                if (cell.is_null()) continue;
 
-            // probe left
-            auto& probe_col_obj = left[left_col];
-            total_rows = probe_col_obj.size();
-            global_idx = 0;
+                bool type_ok = true;
+                if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
+                if(!type_ok) continue;
 
-            for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY) {
-                size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
-                for (size_t i = 0; i < limit; ++i) {
-                    size_t left_idx_val = global_idx + i;
-                    value_t cell = probe_col_obj[left_idx_val];
+                T key;
+                if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
 
-                    if (cell.is_null()) continue;
-                    bool type_ok = true;
-                    if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
-                    if (!type_ok) continue;
+                hash_table.lookup(key, [&](size_t build_idx){
 
-                    T key;
-                    if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
+                    // This runs for every match found.
+                    size_t left_idx  = build_left ? build_idx : current_probe_idx;
+                    size_t right_idx = build_left ? current_probe_idx : build_idx;
 
-                    if (auto* itr = hash_table.lookup(key); itr != nullptr) {
-                        for (auto right_idx : itr->second) {
-                            size_t left_table_cols = left.size();
-                            for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
-                                auto [src_col, _] = output_attrs[out_i];
-                                if (src_col < left_table_cols) {
-                                    results[out_i].push_back(left[src_col][left_idx_val]);
-                                } else {
-                                    results[out_i].push_back(right[src_col - left_table_cols][right_idx]);
-                                }
-                            }
+                    // Construct Result.
+                    for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
+                        auto [src_col, _] = output_attrs[out_i];
+                        if (src_col < left_table_cols) {
+                            results[out_i].push_back(left[src_col][left_idx]);
+                        } else {
+                            results[out_i].push_back(right[src_col - left_table_cols][right_idx]);
                         }
                     }
-                }
+                });
+
             }
+            
         }
+        
     }
 };
 
@@ -259,13 +180,13 @@ ExecuteResult execute_hash_join(const Plan& plan,
 
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
-            case DataType::INT32:   join_algorithm.run<int32_t, IntHasher>(); break;
+            case DataType::INT32:   join_algorithm.run<int32_t>(); break;
             // case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
             default: throw std::runtime_error("unsupported join key type");
         }
     } else {
         switch (std::get<1>(right_types[join.right_attr])) {
-            case DataType::INT32:   join_algorithm.run<int32_t, IntHasher>(); break;
+            case DataType::INT32:   join_algorithm.run<int32_t>(); break;
             // case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
             default: throw std::runtime_error("unsupported join key type");
         }
@@ -287,46 +208,22 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     std::vector<std::vector<Data>> final_columns(output_attrs.size());
     for(auto& col : final_columns) col.reserve(1024); 
 
-    auto run_root_join = [&](auto type_tag, auto hasher_tag) {
+    auto run_root_join = [&](auto type_tag) {
         using T = typename decltype(type_tag)::type;
-        using HasherT = typename decltype(hasher_tag)::type;
-        
-        auto create_hash_table = [&]() {
-            if constexpr (CURRENT_STRATEGY == JoinStrategy::ROBIN_HOOD) return RobinHoodHashMap<T, std::vector<size_t>, HasherT>();
-            else if constexpr (CURRENT_STRATEGY == JoinStrategy::HOPSCOTCH) return HopscotchHash<T, std::vector<size_t>>();
-            else if constexpr (CURRENT_STRATEGY == JoinStrategy::CUCKOO) return CuckooHashMap<T, std::vector<size_t>, HasherT>();
-            else return std::unordered_map<T, std::vector<size_t>>();
-        };
-        // auto hash_table = create_hash_table(); 
-        auto hash_table = UnchainedHashMap<T, std::vector<size_t>>();
+
+        UnchainedHashMap<T, size_t> hash_table;
 
         // build
         ExecuteResult& build_table = join.build_left ? left : right;
         size_t build_col_idx = join.build_left ? join.left_attr : join.right_attr;
-        auto& build_column = build_table[build_col_idx];
-
-        size_t total_rows = build_column.size();
-
+        
         hash_table.create_directory(build_table, build_col_idx);
-
-        for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY) {
-            size_t limit = (global_idx + PAGE_CAPACITY > total_rows) ? total_rows - global_idx : PAGE_CAPACITY;
-            for (size_t i = 0; i < limit; ++i) {
-                size_t idx = global_idx + i;
-                value_t cell = build_column[idx];
-                if (cell.is_null()) continue;
-                T key;
-                if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
-
-                hash_table.insert(key, std::vector<size_t>{idx});
-            }
-        }
 
         // probe
         ExecuteResult& probe_table = join.build_left ? right : left;
         size_t probe_col_idx = join.build_left ? join.right_attr : join.left_attr;
         auto& probe_column = probe_table[probe_col_idx];
-        total_rows = probe_column.size();
+        size_t total_rows = probe_column.size();
         size_t left_table_cols = left.size();
 
         for (size_t global_idx = 0; global_idx < total_rows; global_idx += PAGE_CAPACITY) {
@@ -334,7 +231,9 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
             for (size_t i = 0; i < limit; ++i) {
                 size_t current_probe_idx = global_idx + i;
                 value_t cell = probe_column[current_probe_idx];
+
                 if (cell.is_null()) continue;
+
                 bool type_ok = true;
                 if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
                 else type_ok = (cell.type == value_t::Type::STRING);
@@ -343,27 +242,30 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                 T key;
                 if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
 
-                if (auto* it = hash_table.lookup(key); it != nullptr) {
-                    for (auto build_idx : it->second) {
-                        size_t left_idx  = join.build_left ? build_idx : current_probe_idx;
-                        size_t right_idx = join.build_left ? current_probe_idx : build_idx;
+                hash_table.lookup(key, [&](size_t build_idx){
 
-                        for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
-                            auto [src_col, dtype] = output_attrs[out_i];
-                            value_t val;
-                            if (src_col < left_table_cols) val = left[src_col][left_idx];
-                            else val = right[src_col - left_table_cols][right_idx];
+                    // This runs for every match found.
+                    size_t left_idx  = join.build_left ? build_idx : current_probe_idx;
+                    size_t right_idx = join.build_left ? current_probe_idx : build_idx;
 
-                            if (val.is_null()) {
-                                final_columns[out_i].emplace_back(std::monostate{});
-                            } else if (dtype == DataType::INT32) {
-                                final_columns[out_i].emplace_back(static_cast<int32_t>(val.i32));
-                            } else {
-                                final_columns[out_i].emplace_back(materialize_string_from_value(plan, val));
-                            }
+                    // Construct Result.
+                    for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
+                        auto [src_col, dtype] = output_attrs[out_i];
+
+                        value_t val;
+                        if (src_col < left_table_cols) val = left[src_col][left_idx];
+                        else val = right[src_col - left_table_cols][right_idx];
+
+                        if (val.is_null()) {
+                            final_columns[out_i].emplace_back(std::monostate{});
+                        } else if (dtype == DataType::INT32) {
+                            final_columns[out_i].emplace_back(static_cast<int32_t>(val.i32));
+                        } else {
+                            final_columns[out_i].emplace_back(materialize_string_from_value(plan, val));
                         }
                     }
-                }
+                });
+
             }
         }
     };
@@ -376,7 +278,7 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     DataType key_type = join.build_left ? std::get<1>(left_types[join.left_attr]) 
                                         : std::get<1>(right_types[join.right_attr]);
 
-    if (key_type == DataType::INT32) run_root_join(IntTag{}, IntHasherTag{});
+    if (key_type == DataType::INT32) run_root_join(IntTag{});
     // else run_root_join(StrTag{}, StrHasherTag{});
 
     // Transpose to Rows
@@ -414,7 +316,7 @@ ExecuteResult execute_scan(const Plan& plan,
         auto& column    = input.columns[in_col_idx];
         auto& target_col = results[out_col];
 
-        // Decide whether we can use a zero-copy view for INT32 columns with no NULLs.
+        Decide whether we can use a zero-copy view for INT32 columns with no NULLs.
         if (column.type == DataType::INT32) {
             bool all_no_nulls = true;
             size_t total_items = 0;
@@ -501,42 +403,6 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     auto& root_node = plan.nodes[plan.root];
     auto& j = std::get<JoinNode>(root_node.data);
     return execute_hash_join_root(plan, j, root_node.output_attrs);
-    // if (std::holds_alternative<JoinNode>(root_node.data)) {
-    //     auto& j = std::get<JoinNode>(root_node.data);
-    //     return execute_hash_join_root(plan, j, root_node.output_attrs);
-    // }
-    // // fallback for Scans/Filters
-    // auto ret = execute_impl(plan, plan.root);
-    // auto ret_types = plan.nodes[plan.root].output_attrs
-    //                | views::transform([](const auto& v) { return std::get<1>(v); })
-    //                | ranges::to<std::vector<DataType>>();
-
-    // size_t num_rows = ret.empty() ? 0 : ret[0].size();
-    // std::vector<std::vector<Data>> converted(num_rows);
-    // for(auto& r : converted) r.resize(ret.size());
-
-    // for (size_t col_idx = 0; col_idx < ret.size(); ++col_idx) {
-    //     auto& column = ret[col_idx];
-    //     DataType dtype = ret_types[col_idx];
-    //     size_t row_idx = 0;
-    //     for (const auto& page_ptr : column.pages) {
-    //         size_t limit = (row_idx + PAGE_CAPACITY > num_rows) ? num_rows - row_idx : PAGE_CAPACITY;
-    //         for (size_t i = 0; i < limit; ++i) {
-    //             value_t vv = page_ptr->data[i];
-    //             if (dtype == DataType::INT32) {
-    //                 if (!vv.is_null() && vv.type == value_t::Type::INT32) converted[row_idx + i][col_idx] = Data(static_cast<int32_t>(vv.i32));
-    //                 else converted[row_idx + i][col_idx] = Data(std::monostate{});
-    //             } else {
-    //                 if (!vv.is_null() && vv.type == value_t::Type::STRING) converted[row_idx + i][col_idx] = Data(materialize_string_from_value(plan, vv));
-    //                 else converted[row_idx + i][col_idx] = Data(std::monostate{});
-    //             }
-    //         }
-    //         row_idx += limit;
-    //     }
-    // }
-    // Table table{std::move(converted), std::move(ret_types)};
-    // return table.to_columnar();
-
 }
 
 void* build_context() { return nullptr; }
