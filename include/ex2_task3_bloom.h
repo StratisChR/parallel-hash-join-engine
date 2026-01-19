@@ -51,10 +51,19 @@ inline uint16_t compute_bloom_bits(uint64_t hash) {
     return bloom_tags[index];
 }
 
+inline uint16_t compute_bloom_bits(uint32_t hash_high) {
+    // We simply take the bottom 11 bits. 
+    // This corresponds to bits 32-42 of the original full hash.
+    return bloom_tags[hash_high & 0x7FF];
+}
+
 // Again just implementing the paper's algorithm from FIgure 6.
 // We simply get the 11 bits used to choose a bloom tag.
 inline bool could_contain(uint16_t entry_bloom, uint64_t hash) {
-    uint16_t index = static_cast<uint16_t>((hash >> (32 - 11)) & 0x7FF);
+
+    // uint16_t index = static_cast<uint16_t>((hash >> (32 - 11)) & 0x7FF);
+    uint16_t index = static_cast<uint16_t>((hash >> 32) & 0x7FF);
+
     uint16_t tag = bloom_tags[index];
 
     // Let's suppose:
