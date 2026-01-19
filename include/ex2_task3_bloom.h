@@ -23,11 +23,6 @@ inline uint16_t compute_bloom_bits_separately(uint64_t hash){
     return (1 << bit1) | (1 << bit2) | (1 << bit3) | (1 << bit4);
 }
 
-// Perhaps the above function isn't as useful after all. I thought 
-// the precomputed bloom tags didn't affect the need for the above function,
-// but they do.  I just didn't understand the paper well enough.
-
-
 // We compute once and save time from recomputing bloom tags every time.
 // It doesn't matter if it is not EXACTLY 4 bits per tag.
 inline void precompute_bloom_tags(){
@@ -51,6 +46,7 @@ inline uint16_t compute_bloom_bits(uint64_t hash) {
     return bloom_tags[index];
 }
 
+// I needed and use this version because I was trying to make things faster.
 inline uint16_t compute_bloom_bits(uint32_t hash_high) {
     // We simply take the bottom 11 bits. 
     // This corresponds to bits 32-42 of the original full hash.
