@@ -14,7 +14,7 @@ void UnchainedHashMap<Key, Value>::collect( size_t start_index,
 
     // The indexes are rows in the build side table. 
     for(size_t i = start_index; i < end_index; i++){
-        int32_t key = (*tls.shared_table)[tls.key_col][i].i32; 
+        int32_t key = (*tls.shared_table)[tls.key_col][i].get_int(); 
         uint64_t hash = hash32(static_cast<uint32_t>(key), 0);
 
         // The hashed_keys vector correlates row_indices with the hashes
