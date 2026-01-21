@@ -250,7 +250,7 @@ public: // External Operations:
 
         auto seg_info = get_segment_info(slot);
 
-        if (!could_contain(seg_info.bloom, hashed_key)) return;
+        if (!could_contain_64(seg_info.bloom, hashed_key)) return;
 
         for (uint64_t i = seg_info.start; i < seg_info.end; i++) {
             if (data[i].first == key) {

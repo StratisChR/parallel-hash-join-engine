@@ -75,3 +75,11 @@ inline bool could_contain(uint16_t entry_bloom, uint64_t hash) {
     return !(tag & ~entry_bloom);
 }
 
+// Again just implementing the paper's algorithm from FIgure 6.
+// We simply get the 11 bits used to choose a bloom tag.
+inline bool could_contain_64(uint16_t entry_bloom, uint64_t hash) {
+    uint16_t index = static_cast<uint16_t>((hash >> (32 - 11)) & 0x7FF);
+    uint16_t tag = bloom_tags[index];
+    return !(tag & ~entry_bloom);
+}
+
