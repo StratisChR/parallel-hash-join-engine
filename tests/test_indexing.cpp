@@ -1,6 +1,5 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
-
 #include "indexing.h" 
 
 // ------------------------------------------------------------
@@ -81,35 +80,36 @@ TEST_CASE("StringRef: bitpacking correctness") {
 TEST_CASE("value_t: default constructor creates NULL") {
     value_t v;
 
-    REQUIRE(v.type == value_t::Type::NULLVAL);
     REQUIRE(v.is_null());
 }
 
 TEST_CASE("value_t: INT32 constructor") {
     value_t v(123);
 
-    REQUIRE(v.type == value_t::Type::INT32);
+    REQUIRE(v.is_int());
     REQUIRE(!v.is_null());
-    REQUIRE(v.i32 == 123);
+    REQUIRE(v.get_int() == 123);
 }
 
 TEST_CASE("value_t: STRING constructor with non-null StringRef") {
     StringRef s(1, 2, 3, 99, false);
     value_t v(s);
 
-    REQUIRE(v.type == value_t::Type::STRING);
+    REQUIRE(v.is_string());
     REQUIRE(!v.is_null());
-    REQUIRE(v.str.table_id() == 1);
-    REQUIRE(v.str.column_id() == 2);
-    REQUIRE(v.str.page_id() == 3);
-    REQUIRE(v.str.offset() == 99);
+    REQUIRE(v.get_stringref().table_id() == 1);
+    REQUIRE(v.get_stringref().column_id() == 2);
+    REQUIRE(v.get_stringref().page_id() == 3);
+    REQUIRE(v.get_stringref().offset() == 99);
 }
 
 TEST_CASE("value_t: STRING constructor with null StringRef") {
     StringRef s = StringRef::null();
     value_t v(s);
 
-    REQUIRE(v.type == value_t::Type::STRING);
+   
+
+    REQUIRE(v.is_string());
     REQUIRE(v.is_null());
 }
 
@@ -118,18 +118,18 @@ TEST_CASE("value_t: union correctness across type switches") {
 
     // assign int
     v = value_t(777);
-    REQUIRE(v.type == value_t::Type::INT32);
-    REQUIRE(v.i32 == 777);
+    REQUIRE(v.is_int());
+    REQUIRE(v.get_int() == 777);
     REQUIRE(!v.is_null());
 
     // assign stringref
     StringRef s(9, 8, 7, 1234, false);
     v = value_t(s);
-    REQUIRE(v.type == value_t::Type::STRING);
-    REQUIRE(v.str.table_id() == 9);
-    REQUIRE(v.str.column_id() == 8);
-    REQUIRE(v.str.page_id() == 7);
-    REQUIRE(v.str.offset() == 1234);
+    REQUIRE(v.is_string());
+    REQUIRE(v.get_stringref().table_id() == 9);
+    REQUIRE(v.get_stringref().column_id() == 8);
+    REQUIRE(v.get_stringref().page_id() == 7);
+    REQUIRE(v.get_stringref().offset() == 1234);
 }
 
 TEST_CASE("value_t: null detection rules") {

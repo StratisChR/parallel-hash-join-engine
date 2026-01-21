@@ -51,7 +51,7 @@ std::vector<column_t> create_random_table(size_t num_rows, int seed = 42) {
 
 // Helper to get value from column_t at specific index
 int32_t get_int_value(const column_t& col, size_t idx) {
-    return col[idx].i32;
+    return col[idx].get_int();
 }
 
 

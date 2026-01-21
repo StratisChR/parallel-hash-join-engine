@@ -31,10 +31,10 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // Helper function definition
 static std::string materialize_string_from_value(const Plan& plan, const value_t& vv) {
-    if (vv.type != value_t::Type::STRING) {
+    if (!vv.is_string()) {
         throw std::runtime_error("materialize_string on non-string value");
     }
-    auto sref = vv.str;
+    auto sref = vv.get_stringref();
     if (sref.is_null()) return std::string();
     auto table_id = sref.table_id();
     auto col_id = sref.column_id();
@@ -120,8 +120,8 @@ struct JoinAlgorithm {
 
                     T key;
                     if constexpr (std::is_same_v<T, int32_t>) {
-                        if (cell.type != value_t::Type::INT32) throw std::runtime_error("wrong type");
-                        key = static_cast<T>(cell.i32);
+                        if (!cell.is_int()) throw std::runtime_error("wrong type");
+                        key = static_cast<T>(cell.get_int());
                     }
 
                     hash_table.insert(key, std::vector<size_t>(1, idx));
@@ -140,11 +140,11 @@ struct JoinAlgorithm {
 
                     if (cell.is_null()) continue;
                     bool type_ok = true;
-                    if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
+                    if constexpr (std::is_same_v<T, int32_t>) type_ok = cell.is_int();
                     if (!type_ok) continue;
 
                     T key;
-                    if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
+                    if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
 
                     if (auto* itr = hash_table.lookup(key); itr != nullptr) {
                         for (auto left_idx : itr->second) {
@@ -178,8 +178,8 @@ struct JoinAlgorithm {
 
                     T key;
                     if constexpr (std::is_same_v<T, int32_t>) {
-                        if (cell.type != value_t::Type::INT32) throw std::runtime_error("wrong type");
-                        key = static_cast<T>(cell.i32);
+                        if (!cell.is_int()) throw std::runtime_error("wrong type");
+                        key = static_cast<T>(cell.get_int());
                     }
 
                     hash_table.insert(key, std::vector<size_t>(1, idx));
@@ -199,11 +199,11 @@ struct JoinAlgorithm {
 
                     if (cell.is_null()) continue;
                     bool type_ok = true;
-                    if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
+                    if constexpr (std::is_same_v<T, int32_t>) type_ok = cell.is_int();
                     if (!type_ok) continue;
 
                     T key;
-                    if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
+                    if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
 
                     if (auto* itr = hash_table.lookup(key); itr != nullptr) {
                         for (auto right_idx : itr->second) {
@@ -316,7 +316,7 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                 value_t cell = build_column[idx];
                 if (cell.is_null()) continue;
                 T key;
-                if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
+                if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
 
                 hash_table.insert(key, std::vector<size_t>{idx});
             }
@@ -336,12 +336,12 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                 value_t cell = probe_column[current_probe_idx];
                 if (cell.is_null()) continue;
                 bool type_ok = true;
-                if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
-                else type_ok = (cell.type == value_t::Type::STRING);
+                if constexpr (std::is_same_v<T, int32_t>) type_ok = cell.is_int();
+                else type_ok = cell.is_string();
                 if (!type_ok) continue;
 
                 T key;
-                if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
+                if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
 
                 if (auto* it = hash_table.lookup(key); it != nullptr) {
                     for (auto build_idx : it->second) {
@@ -357,7 +357,7 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                             if (val.is_null()) {
                                 final_columns[out_i].emplace_back(std::monostate{});
                             } else if (dtype == DataType::INT32) {
-                                final_columns[out_i].emplace_back(static_cast<int32_t>(val.i32));
+                                final_columns[out_i].emplace_back(static_cast<int32_t>(val.get_int()));
                             } else {
                                 final_columns[out_i].emplace_back(materialize_string_from_value(plan, val));
                             }

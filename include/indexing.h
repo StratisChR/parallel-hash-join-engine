@@ -43,20 +43,64 @@ struct StringRef {
     uint32_t offset() const { return raw & 0x3FFFFFFF; }
 };
 
+// Compact 64-bit value representation. We pack either a 32-bit integer
+// or a pointer-like StringRef into a single uint64_t. The layout reserves
+// bit 63 as NULL flag, and bit 61 as TYPE flag (1 = STRING, 0 = INT32).
+// The remaining bits keep the original StringRef packing when storing
+// string pointers so we can reuse StringRef helpers.
 struct value_t {
     enum class Type : uint8_t { INT32, STRING, NULLVAL };
 
-    Type type;
-    union {
-        int32_t i32;
-        StringRef str;
-    };
+    uint64_t data = 0;
 
-    value_t() : type(Type::NULLVAL), i32(0) {}
-    explicit value_t(int32_t val) : type(Type::INT32), i32(val) {}
-    explicit value_t(const StringRef& s) : type(Type::STRING), str(s) {}
+    static constexpr uint64_t NULL_MASK = (1ULL << 63);
+    // We use bit 61 for the "is-string" type marker to avoid colliding
+    // with StringRef's bit62 (which indicates "long string").
+    static constexpr uint64_t TYPE_MASK = (1ULL << 61);
 
-    bool is_null() const { return type == Type::NULLVAL || (type == Type::STRING && str.is_null()); }
+    value_t() { data = NULL_MASK; }
+
+    static value_t make_null() { return value_t(); }
+
+    explicit value_t(int32_t val) {
+        // store the 32-bit integer in the low bits. Ensure NULL and TYPE are 0.
+        data = static_cast<uint64_t>(static_cast<uint32_t>(val));
+    }
+
+    explicit value_t(const StringRef& s) {
+        // store the raw StringRef bits, and always mark TYPE_MASK to indicate
+        // that this value_t represents a STRING value (even if the string is null)
+        data = s.raw | TYPE_MASK;
+    }
+
+    bool is_null() const { return (data & NULL_MASK) != 0; }
+    // Note: strings keep the TYPE bit even when they are null. This mirrors the
+    // prior behavior where a value could have Type::STRING and still be null.
+    bool is_string() const { return ((data & TYPE_MASK) != 0); }
+    bool is_int() const { return !is_string() && !is_null(); }
+
+    // Compatibility accessor for older code that used a "type" field.
+    // If TYPE_MASK is set we report STRING (even if the underlying string is null),
+    // otherwise if NULL_MASK is set we report NULLVAL, else INT32.
+    Type type() const {
+        if ((data & TYPE_MASK) != 0) return Type::STRING;
+        if (is_null()) return Type::NULLVAL;
+        return Type::INT32;
+    }
+
+    int32_t get_int() const {
+        return static_cast<int32_t>(static_cast<uint32_t>(data & 0xFFFFFFFFu));
+    }
+
+    // Return a StringRef view to the raw bits stored. This strips the
+    // TYPE_MASK bit so the returned StringRef has the same layout used
+    // elsewhere in the code.
+    StringRef get_stringref() const {
+        StringRef s;
+        // clear TYPE_MASK if present, keep all other bits (including NULL/long)
+        s.raw = data & ~TYPE_MASK;
+        return s;
+    }
 };
 
 

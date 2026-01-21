@@ -261,8 +261,8 @@ public: // External Operations:
 
         for (size_t idx = 0; idx < total_rows; ++idx) {
             const value_t& cell = build_side_table[key_column][idx];
-            if (cell.type == value_t::Type::INT32) {
-                unique_keys.push_back(cell.i32);
+            if (cell.is_int()) {
+                unique_keys.push_back(cell.get_int());
             }
         }
         
