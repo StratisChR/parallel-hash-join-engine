@@ -212,7 +212,7 @@ public: // External Operations:
         std::vector<uint64_t> hashed_keys(total_rows);
        
         for (size_t i = 0; i < total_rows; ++i) {
-            int32_t key = build_side_table[key_column][i].i32; 
+            int32_t key = build_side_table[key_column][i].get_int(); 
             hashed_keys[i] = hash32(static_cast<uint32_t>(key), 0);
         
             uint64_t slot = get_slot(hashed_keys[i]);
@@ -230,7 +230,7 @@ public: // External Operations:
             uint64_t write_pos = directory[slot] >> 16;
             
             // We write the tuple to the contiguous array.
-            int32_t key = build_side_table[key_column][i].i32;
+            int32_t key = build_side_table[key_column][i].get_int();
             data[write_pos] = {key, i}; 
 
             // Move pointer to next free slot. In the end, the pointer will point

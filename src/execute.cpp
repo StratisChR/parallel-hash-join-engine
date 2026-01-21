@@ -31,10 +31,10 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // Helper function definition
 static std::string materialize_string_from_value(const Plan& plan, const value_t& vv) {
-    if (vv.type != value_t::Type::STRING) {
+    if (!vv.is_string()) {
         throw std::runtime_error("materialize_string on non-string value");
     }
-    auto sref = vv.str;
+    auto sref = vv.get_stringref();
     if (sref.is_null()) return std::string();
     auto table_id = sref.table_id();
     auto col_id = sref.column_id();
@@ -130,11 +130,11 @@ struct JoinLogic{
                             if (cell.is_null()) continue;
                             
                             bool type_ok = true;
-                            if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type == value_t::Type::INT32);
+                            if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type() == value_t::Type::INT32);
                             if (!type_ok) continue;
 
                             T key;
-                            if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.i32);
+                            if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
 
                             hash_table.lookup(key, [&](size_t build_idx) {
                                 size_t left_idx  = build_left ? build_idx : current_probe_idx;
@@ -437,10 +437,10 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                     if (src_col < left_table_cols) val = left[src_col][l_idx];
                     else val = right[src_col - left_table_cols][r_idx];
 
-                    if (val.is_null()) {
+                        if (val.is_null()) {
                         local_cols[out_i].emplace_back(std::monostate{});
                     } else if (dtype == DataType::INT32) {
-                        local_cols[out_i].emplace_back(static_cast<int32_t>(val.i32));
+                        local_cols[out_i].emplace_back(static_cast<int32_t>(val.get_int()));
                     } else {
                         local_cols[out_i].emplace_back(materialize_string_from_value(plan, val));
                     }
