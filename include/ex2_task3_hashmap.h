@@ -55,7 +55,8 @@ private:
    static constexpr uint64_t NOT_FOUND = UINT64_MAX;
    static constexpr uint64_t POINTER_MASK = 0xFFFFFFFFFFFF0000;
    static constexpr uint64_t BLOOM_MASK   = 0x000000000000FFFF;
-   static constexpr uint64_t MAX_TUPLES_PER_SEGMENT = 6;
+   // actually the following is not tuples per segment, but unique keys per directory slot.
+   // static constexpr uint64_t MAX_TUPLES_PER_SEGMENT = 1;
    static constexpr double MAX_LOAD_FACTOR = 65; // we write it in %
    
    // Each entry in the directory contains a 64 bit unsigned, which is divided in two parts
@@ -115,7 +116,6 @@ private: // Utilities:
         uint64_t entry = get_entry(slot);
         uint64_t filter = static_cast<uint16_t>(entry & BLOOM_MASK);
         return filter;
-
     }
 
     inline SegmentCache get_segment_info(uint64_t slot) const {
@@ -131,110 +131,53 @@ private: // Utilities:
         return static_cast<double>(num_elements) / static_cast<double>(capacity);
     }
 
-    // bool needs_array_rehash() const {
-    //     return get_load_factor() > MAX_LOAD_FACTOR;
-    // }
-
-    bool needs_directory_rehash(uint64_t entry) const{
-        return entry > MAX_TUPLES_PER_SEGMENT;
-    }
-
+    // I am changing this function to match the paper better.
     void calc_capacity(){
         if (num_elements == 0) {
-            shift = 53;
-            capacity = 1ULL << (64 - shift);  // 2048
-            return;
+        shift = 53;
+        capacity = 1ULL << (64 - shift);  // 2048 entries
+        return;
         }
-        uint64_t min_required = (num_elements * 100) / MAX_LOAD_FACTOR;
 
-        // // We round up min_required to the next power of two
-        // uint64_t n = min_required - 1;
-        // n |= n >> 1;
-        // n |= n >> 2;
-        // n |= n >> 4;
-        // n |= n >> 8;
-        // n |= n >> 16;
-        // n |= n >> 32;
-        // uint64_t capacity = n + 1;
+        // The paper said the hash table is assumed to have size 𝑚 = 2⌈log2 (1.125𝑛) ⌉
+        // So to achieve this using integer arithmetic:
+        // 1.125n = (9/8)n
+        // To simulate the ceiling, we add 7 to 9*n before dividing by 8.
+        uint64_t target_size = (num_elements * 9 + 7) / 8;
 
-        
-        // // We compute the k required for 2^k = capacity
-        // int k = 0;
-        // uint64_t temp = capacity;
-        // while (temp > 1) {
-        //     temp >>= 1;
-        //     k++;
-        // }
-        // int computed_shift = 64 - k;
+        // Now we round up to the next power of two.
+        uint64_t capacity_val = (target_size <= 1) ? 1 : 
+        (1ULL << (64 - __builtin_clzll(target_size - 1)));
 
-        // The following might be faster than the old version
-        uint64_t capacity_val = (min_required == 0) ? 1 : 
-            (1ULL << (64 - __builtin_clzll(min_required - 1)));
-        
+        // We compute the shift.
+        // capacity = 2^k, so shift = 64 - k
         int k = __builtin_ctzll(capacity_val);
         int computed_shift = 64 - k;
-        
-        //    We keep at least a size of 2^11
+
         shift = (computed_shift < 53) ? computed_shift : 53;
         capacity = 1ULL << (64 - shift);
     }
 
 private: // Everything related to rehashing/resizing:
 
-    void double_directory(){
-        if (shift <= 35) {
-            throw std::runtime_error("Cannot double directory further - shift would be negative");
-        }
-        shift--;
-        capacity = 1ULL << (64 - shift);
-        directory.resize(capacity,0);
-    }
-
-    // THis function first decreases shift by one. Then we allocate a new directory
-    // and redestribute all tuples from the old dir to the new one.
-    // While redestributing, we also rebuild the bloom filters.
-    void grow_directory(){
-        directory.resize(capacity, 0); 
-    }
-
     // Create array, separate segments based on number in each directory slot.
     // It also creates the pointers in the directory.
     void build_data_array(){
-        // Initialize data array
-        data.resize(num_elements);  // ← Changed from reserve() to resize()
-    
-        std::fill(data.begin(), data.end(), std::pair<Key, Value>{EMPTY_KEY, Value()});
-
-        // Build prefix sum for pointers
-        uint64_t cumsum = 0;
-        for (uint64_t i = 0; i < capacity; i++) {
-            cumsum += directory[i];
-            directory[i] = cumsum << 16;  // Store as pointer
+        // Set the pointers in the directory.
+        uint64_t current_offset = 0;
+        for (size_t i = 0; i < capacity; ++i) {
+            uint64_t count = directory[i];
+            
+            directory[i] = (current_offset << 16);
+            
+            current_offset += count;
         }
-    }
 
-    // // Depending on how I implement the resize, this might be useful, but probably not 
-    // // since each insert already updates the bloom filter.
-    // void rebuild_bloom_for_slot(u64 slot);
+        // Resize the contiguous data array to fit exactly all elements
+        data.resize(current_offset); 
+    }
 
 private: // Support for the external operations:
-
-    // I might use something like this to exactly find the available position for 
-    // a new tuple in the segment when inserting.
-    uint64_t find_insert_position(uint64_t hash){
-        uint64_t slot_in_directory = get_slot(hash);
-        
-        // Calculate start and end of segment
-        uint64_t seg_start = (slot_in_directory == 0) ? 0 : get_slot_pointer(slot_in_directory - 1);
-        uint64_t seg_end = get_slot_pointer(slot_in_directory);
-        
-        for(uint64_t i = seg_start; i < seg_end; i++){
-            if(data[i].first == EMPTY_KEY){
-                return i;
-            }
-        }
-        return NOT_FOUND;
-    }
 
     // We use it when inserting.
     void update_bloom_filter(uint64_t slot, uint16_t bloom_tag){
@@ -255,136 +198,68 @@ public: // External Operations:
     // updated to keep only unique keys
     void create_directory(std::vector<column_t>& build_side_table, size_t key_column){
         size_t total_rows = build_side_table[key_column].size();
-        // Count unique keys first
-        std::vector<Key> unique_keys;
-        unique_keys.reserve(total_rows);
 
-        for (size_t idx = 0; idx < total_rows; ++idx) {
-            const value_t& cell = build_side_table[key_column][idx];
-            if (cell.is_int()) {
-                unique_keys.push_back(cell.get_int());
-            }
-        }
         
-        if (!unique_keys.empty()) {
-            std::sort(unique_keys.begin(), unique_keys.end());
-            auto last = std::unique(unique_keys.begin(), unique_keys.end());
-            unique_keys.erase(last, unique_keys.end());
-        }
-        // for (const auto& row : build_side_table) {
-        //     unique_keys.insert(row[key_column].i32);
-        // }
-        
-        num_elements = unique_keys.size();  
+        // The calculate capacity function has to change. I had misunderstood the paper. 
+        num_elements = total_rows; 
         calc_capacity();
-        if (capacity != 2048){
-            grow_directory();
+        
+        directory.assign(capacity, 0);
+
+        // I might precompute all hashes first to speed up the process.
+
+        // Counting how many tuples go to each slot.
+        std::vector<uint64_t> hashed_keys(total_rows);
+       
+        for (size_t i = 0; i < total_rows; ++i) {
+            int32_t key = build_side_table[key_column][i].i32; 
+            hashed_keys[i] = hash32(static_cast<uint32_t>(key), 0);
+        
+            uint64_t slot = get_slot(hashed_keys[i]);
+            directory[slot]++;
         }
 
-        // Computing hashes to save time.
-        std::vector<std::pair<uint64_t, Key>> hashed_keys;
-        hashed_keys.reserve(unique_keys.size());
-
-        for (const auto& key : unique_keys) {
-            // Only pay the cost of hash32 once per key.
-            hashed_keys.emplace_back(hash32(static_cast<uint32_t>(key), 0), key);
-        }
-
-        bool start_again = true;
-        while(start_again){
-            start_again = false;
-            std::fill(directory.begin(), directory.end(), 0);
-
-            for (const auto& [hashed, _] : hashed_keys) {
-                uint64_t slot = get_slot(hashed);
-                directory[slot]++;
-                
-                if (directory[slot] > MAX_TUPLES_PER_SEGMENT) {
-                    double_directory();
-                    start_again = true;
-                    break;
-                }
-            }
-        }
         build_data_array();
-    }
 
-    // Might call it emplace to make simple drop in for execute.cpp possible
-    void insert(const Key& key, const Value& value){
+        // Copy the tuples.
+        for (size_t i = 0; i < total_rows; ++i) {
+            uint64_t hash = hashed_keys[i];
+            uint64_t slot = get_slot(hash);
+
+            // We get the write position from the directory.
+            uint64_t write_pos = directory[slot] >> 16;
+            
+            // We write the tuple to the contiguous array.
+            int32_t key = build_side_table[key_column][i].i32;
+            data[write_pos] = {key, i}; 
+
+            // Move pointer to next free slot. In the end, the pointer will point
+            // to the end of the segment.
+            directory[slot] += (1ULL << 16);
+
+            // update bloom filter
+            directory[slot] |= compute_bloom_bits(hash);
+        }
+    }
+        
+    
+    template <typename Func>
+    void lookup(Key key, Func process_match) {
         uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
         uint64_t slot = get_slot(hashed_key);
 
         auto seg_info = get_segment_info(slot);
 
-        // Check for existing key AND find empty slot in one pass
-        uint64_t empty_pos = NOT_FOUND;
-        for(uint64_t i = seg_info.start; i < seg_info.end; i++){
-            if (data[i].first == key) {
-                // Found existing - append and return
-                data[i].second.insert(data[i].second.end(), value.begin(), value.end());
-                return;
-            }
-            if (empty_pos == NOT_FOUND && data[i].first == EMPTY_KEY) {
-                empty_pos = i;
-            }
-        }
-        
-        // Not found - insert at empty position
-        if(empty_pos == NOT_FOUND){
-            throw std::runtime_error("Segment full!");
-        }
-        
-        data[empty_pos] = {key, value};
-
-        // uint64_t position = find_insert_position(hashed_key);
-        // if(position == NOT_FOUND){
-        //     throw std::runtime_error("Segment full! We must have done something wrong when creating directory and array");
-        // }
-        // // add key and  value
-        // data[position] = {key, value};
-
-        uint16_t bloom_tag = compute_bloom_bits(hashed_key);
-        update_bloom_filter(slot, bloom_tag);
-    }
-
-    // lookup can call produce matches.
-    // It returns a pointer to our values, not our actual values.
-    std::pair<Key, Value>* lookup(Key key){
-        uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
-        uint64_t slot = get_slot(hashed_key);
-
-        auto seg_info = get_segment_info(slot);
-
-        if(!could_contain(seg_info.bloom, hashed_key)){
-            return nullptr;
-        }
+        if (!could_contain_64(seg_info.bloom, hashed_key)) return;
 
         for (uint64_t i = seg_info.start; i < seg_info.end; i++) {
             if (data[i].first == key) {
-                return &data[i];
-            }  
+                
+                // For every match, we run a lambda function provided by the caller.
+                process_match(data[i].second);
+            }
         }
-
-        return nullptr;
     }
     
-    // std::pair<Key, Value>* produce_matches(Key key, uint64_t slot, uint64_t entry){
-    //     uint64_t start;
-    //     if (slot == 0)
-    //     {
-    //         start = 0;
-    //     }else{
-    //         start = get_slot_pointer(slot-1);
-    //     }
-    //     uint64_t end = entry >> 16;
-
-    //     for (uint64_t array_index = start; array_index < end; array_index++)
-    //     {
-    //         if (data[array_index].first == key)
-    //         {
-    //             return &data[array_index];
-    //         }  
-    //     }
-    //     return nullptr;
-    // }
+    
 };

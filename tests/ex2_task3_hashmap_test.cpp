@@ -5,7 +5,7 @@
 #include <algorithm> 
 #include "ex2_task3_hashmap.h"
 
-// Helper functions for Columnar tables
+// Helper Function for creating columnar tables
 
 std::vector<column_t> create_empty_table(size_t num_cols) {
     std::vector<column_t> table;
@@ -19,13 +19,15 @@ std::vector<column_t> create_empty_table(size_t num_cols) {
 std::vector<column_t> create_simple_table(size_t num_rows) {
     auto table = create_empty_table(2); 
     for (size_t i = 0; i < num_rows; i++) {
+        // Keys 0, 1, 2...
         table[0].push_back(value_t(static_cast<int32_t>(i)));
+        // Values (not used by hash map, but realistic)
         table[1].push_back(value_t(static_cast<int32_t>(i * 10)));
     }
     return table;
 }
 
-// iterates keys 0-9 
+// Generates keys 0-9 repeatedly: 0, 1, ... 9, 0, 1, ...
 std::vector<column_t> create_table_with_duplicates(size_t num_rows) {
     auto table = create_empty_table(2);
     for (size_t i = 0; i < num_rows; i++) {
@@ -38,7 +40,7 @@ std::vector<column_t> create_table_with_duplicates(size_t num_rows) {
 
 std::vector<column_t> create_random_table(size_t num_rows, int seed = 42) {
     std::mt19937 gen(seed);
-    std::uniform_int_distribution<int32_t> dist(0, 10000);
+    std::uniform_int_distribution<int32_t> dist(0, 5000); 
     auto table = create_empty_table(2);
     for (size_t i = 0; i < num_rows; i++) {
         int32_t key = dist(gen);
@@ -49,285 +51,151 @@ std::vector<column_t> create_random_table(size_t num_rows, int seed = 42) {
     return table;
 }
 
-// Helper to get value from column_t at specific index
+// Helper to get value from column_t
 int32_t get_int_value(const column_t& col, size_t idx) {
     return col[idx].get_int();
 }
 
+// Unit Tests
 
-// Tests
-
-TEST_CASE("UnchainedHashMap - Basic workflow with small table", "[hashmap][basic]") {
-    size_t num_rows = 10;
+TEST_CASE("UnchainedHashMap - Basic Workflow (1:1 Mapping)", "[hashmap][basic]") {
+    size_t num_rows = 50;
     auto build_table = create_simple_table(num_rows);
     size_t key_column = 0;
 
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
+    // Value type is size_t (Row Index). We don't want/need vectors.
+    UnchainedHashMap<int32_t, size_t> hash_map;
 
-    SECTION("Create directory and insert values") {
-        hash_map.create_directory(build_table, key_column);
+    // BUild phase 
+    REQUIRE_NOTHROW(hash_map.create_directory(build_table, key_column));
 
-        for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-            int32_t key = get_int_value(build_table[key_column], row_idx);
-            hash_map.insert(key, std::vector<size_t>{row_idx});
-        }
-
-        SECTION("Lookup all existing keys") {
-            for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-                int32_t key = get_int_value(build_table[key_column], row_idx);
-                auto* result = hash_map.lookup(key);
-                
-                REQUIRE(result != nullptr);
-                CHECK(result->first == key);
-                REQUIRE(result->second.size() == 1);
-                CHECK(result->second[0] == row_idx);
-            }
-        }
-
-        SECTION("Lookup non-existent keys") {
-            for (int32_t key = 100; key < 110; key++) {
-                auto* result = hash_map.lookup(key);
-                CHECK(result == nullptr);
-            }
-        }
-    }
-}
-
-TEST_CASE("UnchainedHashMap - Medium table workflow", "[hashmap][medium]") {
-    size_t num_rows = 100;
-    auto build_table = create_simple_table(num_rows);
-    size_t key_column = 0;
-
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
-    hash_map.create_directory(build_table, key_column);
-
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        hash_map.insert(key, std::vector<size_t>{row_idx});
-    }
-
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        auto* result = hash_map.lookup(key);
-        
-        REQUIRE(result != nullptr);
-        CHECK(result->first == key);
-        REQUIRE(result->second.size() == 1);
-        CHECK(result->second[0] == row_idx);
-    }
-}
-
-TEST_CASE("UnchainedHashMap - Large table workflow", "[hashmap][large]") {
-    size_t num_rows = 10000;
-    auto build_table = create_simple_table(num_rows);
-    size_t key_column = 0;
-
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
-    hash_map.create_directory(build_table, key_column);
-
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        hash_map.insert(key, std::vector<size_t>{row_idx});
-    }
-
-    SECTION("Sample lookups across the table") {
-        for (size_t row_idx = 0; row_idx < num_rows; row_idx += 100) {
-            int32_t key = get_int_value(build_table[key_column], row_idx);
-            auto* result = hash_map.lookup(key);
+    SECTION("Probe existing keys") {
+        for (size_t expected_row_idx = 0; expected_row_idx < num_rows; expected_row_idx++) {
+            int32_t key = get_int_value(build_table[key_column], expected_row_idx);
             
-            REQUIRE(result != nullptr);
-            CHECK(result->first == key);
-            REQUIRE(result->second.size() == 1);
-            CHECK(result->second[0] == row_idx);
+            bool callback_called = false;
+            
+            // Probe using a lambda function.
+            hash_map.lookup(key, [&](size_t found_idx) {
+                callback_called = true;
+                CHECK(found_idx == expected_row_idx);
+            });
+            
+            CHECK(callback_called);
         }
     }
 
-    SECTION("Lookup first and last elements") {
-        auto* first = hash_map.lookup(0);
-        REQUIRE(first != nullptr);
-        CHECK(first->first == 0);
-        
-        bool found_0 = false;
-        for(auto idx : first->second) if(idx == 0) found_0 = true;
-        CHECK(found_0);
-
-        auto* last = hash_map.lookup(9999);
-        REQUIRE(last != nullptr);
-        CHECK(last->first == 9999);
-        bool found_last = false;
-        for(auto idx : last->second) if(idx == 9999) found_last = true;
-        CHECK(found_last);
+    SECTION("Probe non-existent keys") {
+        // Keys 1000+ do not exist in the table
+        for (int32_t key = 1000; key < 1010; key++) {
+            bool callback_called = false;
+            hash_map.lookup(key, [&](size_t) {
+                callback_called = true; 
+            });
+            CHECK_FALSE(callback_called);
+        }
     }
 }
 
-TEST_CASE("UnchainedHashMap - Duplicate keys", "[hashmap][duplicates]") {
+TEST_CASE("UnchainedHashMap - Duplicate Keys Handling", "[hashmap][duplicates]") {
+    // 100 rows, keys 0-9 repeated 10 times each.
     size_t num_rows = 100;
     auto build_table = create_table_with_duplicates(num_rows);
     size_t key_column = 0;
 
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
+    UnchainedHashMap<int32_t, size_t> hash_map;
     hash_map.create_directory(build_table, key_column);
 
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        // Duplicate handling happens inside insert()
-        hash_map.insert(key, std::vector<size_t>{row_idx});
+    SECTION("Find all rows for a specific key") {
+        int32_t target_key = 5; 
+        std::vector<size_t> found_indices;
+
+        // The probe should trigger the lambda 10 times.
+        hash_map.lookup(target_key, [&](size_t idx) {
+            found_indices.push_back(idx);
+        });
+
+        // Verification.
+        REQUIRE(found_indices.size() == 10);
+        
+        // Sort to ensure we check contents regardless of retrieval order.
+        std::sort(found_indices.begin(), found_indices.end());
+
+        // We expect rows: 5, 15, 25, ... 95
+        for (size_t i = 0; i < 10; i++) {
+            CHECK(found_indices[i] == (i * 10 + 5));
+        }
     }
 
-    SECTION("Lookup each unique key and verify all row indices") {
-        for (int32_t key = 0; key < 10; key++) {
-            auto* result = hash_map.lookup(key);
-            REQUIRE(result != nullptr);
-            CHECK(result->first == key);
-            
-            REQUIRE(result->second.size() == 10);
-            
-            for (size_t i = 0; i < result->second.size(); i++) {
-                CHECK((result->second[i] % 10) == static_cast<size_t>(key));
-            }
+    SECTION("Verify every key has exactly 10 matches") {
+        for (int32_t k = 0; k < 10; k++) {
+            size_t count = 0;
+            hash_map.lookup(k, [&](size_t) { count++; });
+            CHECK(count == 10);
         }
     }
 }
 
-TEST_CASE("UnchainedHashMap - Random data", "[hashmap][random]") {
-    size_t num_rows = 1000;
-    auto build_table = create_random_table(num_rows, 42);
+TEST_CASE("UnchainedHashMap - Random Data Stress Test", "[hashmap][random]") {
+    size_t num_rows = 10000;
+    auto build_table = create_random_table(num_rows, 999);
     size_t key_column = 0;
 
+    // Use unordered map to check results.
     std::unordered_map<int32_t, std::vector<size_t>> ground_truth;
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        ground_truth[key].push_back(row_idx);
+    for (size_t i = 0; i < num_rows; i++) {
+        int32_t key = get_int_value(build_table[key_column], i);
+        ground_truth[key].push_back(i);
     }
 
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
+    // Build our Unchained Map
+    UnchainedHashMap<int32_t, size_t> hash_map;
     hash_map.create_directory(build_table, key_column);
 
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        hash_map.insert(key, std::vector<size_t>{row_idx});
-    }
-
-    SECTION("Verify all keys and their row indices") {
-        for (const auto& [key, expected_rows] : ground_truth) {
-            auto* result = hash_map.lookup(key);
-            REQUIRE(result != nullptr);
-            CHECK(result->first == key);
-            REQUIRE(result->second.size() == expected_rows.size());
+    SECTION("Compare against Ground Truth") {
+        for (const auto& [key, expected_indices] : ground_truth) {
+            std::vector<size_t> actual_indices;
             
-            for (size_t i = 0; i < expected_rows.size(); i++) {
-                CHECK(result->second[i] == expected_rows[i]);
-            }
+            hash_map.lookup(key, [&](size_t idx) {
+                actual_indices.push_back(idx);
+            });
+
+            // Sort both for comparison (hash map order is stable-ish but not guaranteed sorted)
+            std::vector<size_t> sorted_expected = expected_indices;
+            std::sort(sorted_expected.begin(), sorted_expected.end());
+            std::sort(actual_indices.begin(), actual_indices.end());
+
+            REQUIRE(actual_indices.size() == sorted_expected.size());
+            CHECK(actual_indices == sorted_expected);
         }
     }
 }
 
-TEST_CASE("UnchainedHashMap - Empty table", "[hashmap][edge]") {
-    auto empty_table = create_empty_table(2); 
-    size_t key_column = 0;
-
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
-    hash_map.create_directory(empty_table, key_column);
-
-    SECTION("Lookup in empty table returns nullptr") {
-        auto* result = hash_map.lookup(0);
-        CHECK(result == nullptr);
+TEST_CASE("UnchainedHashMap - Edge Cases", "[hashmap][edge]") {
+    
+    SECTION("Empty Table") {
+        auto empty_table = create_empty_table(2);
+        UnchainedHashMap<int32_t, size_t> hash_map;
         
-        result = hash_map.lookup(100);
-        CHECK(result == nullptr);
-    }
-}
-
-TEST_CASE("UnchainedHashMap - Single element", "[hashmap][edge]") {
-    auto build_table = create_simple_table(1);
-    size_t key_column = 0;
-
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
-    hash_map.create_directory(build_table, key_column);
-
-    int32_t key = get_int_value(build_table[key_column], 0);
-    hash_map.insert(key, std::vector<size_t>{0});
-
-    SECTION("Lookup single element") {
-        auto* result = hash_map.lookup(key);
-        REQUIRE(result != nullptr);
-        CHECK(result->first == key);
-        REQUIRE(result->second.size() == 1);
-        CHECK(result->second[0] == 0);
-    }
-
-    SECTION("Lookup non-existent element") {
-        auto* result = hash_map.lookup(key + 1);
-        CHECK(result == nullptr);
-    }
-}
-
-TEST_CASE("UnchainedHashMap - Directory rehashing stress test", "[hashmap][stress]") {
-    auto build_table = create_empty_table(2);
-    size_t num_rows = 50;
-    
-    for (int i = 0; i < 50; i++) {
-        build_table[0].push_back(value_t(static_cast<int32_t>(i)));
-        build_table[1].push_back(value_t(static_cast<int32_t>(i * 100)));
-    }
-    
-    size_t key_column = 0;
-
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
-    hash_map.create_directory(build_table, key_column);
-
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        hash_map.insert(key, std::vector<size_t>{row_idx});
-    }
-
-    for (size_t row_idx = 0; row_idx < num_rows; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        auto* result = hash_map.lookup(key);
+        // Should not crash
+        REQUIRE_NOTHROW(hash_map.create_directory(empty_table, 0));
         
-        REQUIRE(result != nullptr);
-        CHECK(result->first == key);
-        REQUIRE(result->second.size() == 1);
-        CHECK(result->second[0] == row_idx);
-    }
-}
-
-TEST_CASE("UnchainedHashMap - Complete workflow verification", "[hashmap][workflow]") {
-    const size_t TABLE_SIZE = 500;
-    auto build_table = create_simple_table(TABLE_SIZE);
-    size_t key_column = 0;
-
-    UnchainedHashMap<int32_t, std::vector<size_t>> hash_map;
-
-    SECTION("Phase 1: Create directory") {
-        REQUIRE_NOTHROW(hash_map.create_directory(build_table, key_column));
+        // Probe should find nothing
+        bool called = false;
+        hash_map.lookup(123, [&](size_t){ called = true; });
+        CHECK_FALSE(called);
     }
 
-    hash_map.create_directory(build_table, key_column);
+    SECTION("Single Row Table") {
+        auto table = create_simple_table(1); // Key: 0, Row: 0
+        UnchainedHashMap<int32_t, size_t> hash_map;
+        hash_map.create_directory(table, 0);
 
-    SECTION("Phase 2: Insert all values") {
-        for (size_t row_idx = 0; row_idx < TABLE_SIZE; row_idx++) {
-            int32_t key = get_int_value(build_table[key_column], row_idx);
-            REQUIRE_NOTHROW(hash_map.insert(key, std::vector<size_t>{row_idx}));
-        }
-    }
-    
-    for (size_t row_idx = 0; row_idx < TABLE_SIZE; row_idx++) {
-        int32_t key = get_int_value(build_table[key_column], row_idx);
-        hash_map.insert(key, std::vector<size_t>{row_idx});
-    }
-
-    SECTION("Phase 3: Probe - verify all inserts") {
-        size_t found_count = 0;
-        for (size_t row_idx = 0; row_idx < TABLE_SIZE; row_idx++) {
-            int32_t key = get_int_value(build_table[key_column], row_idx);
-            auto* result = hash_map.lookup(key);
-            
-            if (result != nullptr && result->first == key && 
-                result->second.size() == 1 && result->second[0] == row_idx) {
-                found_count++;
-            }
-        }
-        CHECK(found_count == TABLE_SIZE);
+        bool called = false;
+        hash_map.lookup(0, [&](size_t idx){ 
+            called = true; 
+            CHECK(idx == 0);
+        });
+        CHECK(called);
     }
 }
