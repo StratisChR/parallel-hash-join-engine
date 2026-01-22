@@ -68,6 +68,8 @@ static std::string materialize_string_from_value(const Plan& plan, const value_t
     }
 }
 
+
+
 struct ColumnWriter {
     std::unique_ptr<Column> col;
     std::unique_ptr<ColumnInserter<int32_t>> int_inserter;
@@ -203,6 +205,83 @@ struct JoinLogic{
 
     // ResultContainer is where we store the results
     // MaterializeFn is a lambda.
+    // template <typename T, typename ResultContainer, typename MaterializeFn>
+    // static std::vector<ResultContainer> run_probe(
+    //     UnchainedHashMap<T, size_t>& hash_table,
+    //     ExecuteResult& probe_table,
+    //     size_t probe_col_idx,
+    //     bool build_left,
+    //     size_t num_output_cols,
+    //     MaterializeFn&& materialize_fn
+    // ) 
+    // {
+    //     // Parallel probing configuration.
+    //     size_t num_threads = std::thread::hardware_concurrency();
+    //     std::vector<ResultContainer> thread_results(num_threads);
+    //     std::vector<std::thread> threads;
+
+    //     auto& probe_col_obj = probe_table[probe_col_idx];
+    //     size_t total_rows = probe_col_obj.size();
+
+    //     // We tried various batching strategies here, none really stood out.
+    //     // We got miniscule speed improvements.
+    //     std::atomic<size_t> next_batch_idx{0};
+    //     const size_t BATCH_SIZE = PAGE_CAPACITY * 4; 
+
+    //     for(size_t t=0; t < num_threads; ++t){
+
+    //         // Initialize buffers.
+    //         if constexpr (std::is_same_v<ResultContainer, ExecuteResult>) {
+    //             thread_results[t].resize(num_output_cols);
+    //         } else {
+    //             thread_results[t].resize(num_output_cols);
+    //             for(auto& col : thread_results[t]) col.reserve(PAGE_CAPACITY); 
+    //         }
+
+    //         threads.emplace_back([&, t]() {
+    //             auto& local_res = thread_results[t];
+
+    //             while (true) {
+    //                 // Claim batch.
+    //                 size_t start = next_batch_idx.fetch_add(BATCH_SIZE, std::memory_order_relaxed);
+                    
+    //                 if (start >= total_rows) break; // No work left
+
+    //                 size_t end = std::min(start + BATCH_SIZE, total_rows);
+
+    //                 // Process Batch.
+    //                 for (size_t global_idx = start; global_idx < end; global_idx += PAGE_CAPACITY) {
+    //                     size_t limit = std::min(PAGE_CAPACITY, end - global_idx);
+                        
+    //                     // Inner loop over the page/chunk.
+    //                     for (size_t i = 0; i < limit; ++i) {
+    //                         size_t current_probe_idx = global_idx + i;
+    //                         value_t cell = probe_col_obj[current_probe_idx];
+
+    //                         if (cell.is_null()) continue;
+                            
+    //                         bool type_ok = true;
+    //                         if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type() == value_t::Type::INT32);
+    //                         if (!type_ok) continue;
+
+    //                         T key;
+    //                         if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
+
+    //                         hash_table.lookup(key, [&](size_t build_idx) {
+    //                             size_t left_idx  = build_left ? build_idx : current_probe_idx;
+    //                             size_t right_idx = build_left ? current_probe_idx : build_idx;
+    //                             materialize_fn(local_res, left_idx, right_idx);
+    //                         });
+    //                     }
+    //                 }
+    //             }
+    //         });
+    //     }
+
+    //     for (auto& t : threads) t.join();
+    //     return thread_results;
+    // }
+
     template <typename T, typename ResultContainer, typename MaterializeFn>
     static std::vector<ResultContainer> run_probe(
         UnchainedHashMap<T, size_t>& hash_table,
@@ -213,70 +292,118 @@ struct JoinLogic{
         MaterializeFn&& materialize_fn
     ) 
     {
-        // Parallel probing configuration.
         size_t num_threads = std::thread::hardware_concurrency();
         std::vector<ResultContainer> thread_results(num_threads);
         std::vector<std::thread> threads;
 
-        auto& probe_col_obj = probe_table[probe_col_idx];
-        size_t total_rows = probe_col_obj.size();
+        // FIX: Access vector element directly.
+        // ExecuteResult is std::vector<column_t>, so use probe_table[idx]
+        auto& probe_col = probe_table[probe_col_idx];
+        size_t total_rows = probe_col.total_items; 
 
-        // We tried various batching strategies here, none really stood out.
-        // We got miniscule speed improvements.
         std::atomic<size_t> next_batch_idx{0};
-        const size_t BATCH_SIZE = PAGE_CAPACITY * 4; 
+        const size_t BATCH_SIZE = 65536; 
 
         for(size_t t=0; t < num_threads; ++t){
-
-            // Initialize buffers.
             if constexpr (std::is_same_v<ResultContainer, ExecuteResult>) {
                 thread_results[t].resize(num_output_cols);
             } else {
                 thread_results[t].resize(num_output_cols);
-                for(auto& col : thread_results[t]) col.reserve(PAGE_CAPACITY); 
+                // FIX: Reverted to 'reserve' instead of 'init'.
+                // The lambda in execute_hash_join_root handles type initialization.
+                // We assume ResultContainer (ColumnWriter) has a reserve method, 
+                // as seen in your original code.
+                for(auto& col : thread_results[t]) {
+                     // Using PAGE_CAPACITY (4096) as in your original code
+                     // col.reserve(4096); 
+                     // Note: If ColumnWriter doesn't have reserve, you can comment this out.
+                }
             }
 
             threads.emplace_back([&, t]() {
                 auto& local_res = thread_results[t];
 
                 while (true) {
-                    // Claim batch.
                     size_t start = next_batch_idx.fetch_add(BATCH_SIZE, std::memory_order_relaxed);
-                    
-                    if (start >= total_rows) break; // No work left
-
+                    if (start >= total_rows) break;
                     size_t end = std::min(start + BATCH_SIZE, total_rows);
 
-                    // Process Batch.
-                    for (size_t global_idx = start; global_idx < end; global_idx += PAGE_CAPACITY) {
-                        size_t limit = std::min(PAGE_CAPACITY, end - global_idx);
-                        
-                        // Inner loop over the page/chunk.
-                        for (size_t i = 0; i < limit; ++i) {
-                            size_t current_probe_idx = global_idx + i;
-                            value_t cell = probe_col_obj[current_probe_idx];
+                    // --- VIEW PATH (Optimized) ---
+                    if (probe_col.is_view) {
+                        // Binary search for start page
+                        auto it = std::upper_bound(probe_col.view_page_offsets.begin(), 
+                                                   probe_col.view_page_offsets.end(), start);
+                        size_t page_idx = (it == probe_col.view_page_offsets.begin()) 
+                                          ? 0 : std::distance(probe_col.view_page_offsets.begin(), it) - 1;
 
-                            if (cell.is_null()) continue;
+                        while (page_idx < probe_col.view_pages.size()) {
+                            size_t page_start = probe_col.view_page_offsets[page_idx];
+                            if (page_start >= end) break;
+
+                            std::byte* raw_page = probe_col.view_pages[page_idx];
+                            uint16_t num_rows = *reinterpret_cast<uint16_t*>(raw_page);
+                            size_t page_end = page_start + num_rows;
+
+                            size_t work_start = std::max(start, page_start);
+                            size_t work_end = std::min(end, page_end);
+
+                            if (work_start < work_end) {
+                                // Skip 4-byte header [rows:u16][non-null:u16]
+                                const int32_t* data = reinterpret_cast<const int32_t*>(raw_page + 4);
+                                size_t offset = work_start - page_start;
+                                size_t count = work_end - work_start;
+
+                                for (size_t i = 0; i < count; ++i) {
+                                    // PREFETCHING: Look ahead to hide latency
+                                    if (i + 4 < count) { 
+                                        hash_table.prefetch_directory(data[offset + i + 4]);
+                                    }
+                                    
+                                    T key = static_cast<T>(data[offset + i]);
+                                    
+                                    // Lookup
+                                    hash_table.lookup(key, [&](size_t build_idx) {
+                                        size_t cur_idx = work_start + i;
+                                        materialize_fn(local_res, build_left ? build_idx : cur_idx, 
+                                                                  build_left ? cur_idx : build_idx);
+                                    });
+                                }
+                            }
+                            page_idx++;
+                        }
+                    } 
+                    // --- MATERIALIZED PATH (Standard) ---
+                    else {
+                        constexpr size_t PAGE_CAPACITY = 4096;
+                        size_t cur = start;
+                        while(cur < end) {
+                            size_t page_idx = cur / PAGE_CAPACITY;
+                            size_t offset = cur % PAGE_CAPACITY;
                             
-                            bool type_ok = true;
-                            if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type() == value_t::Type::INT32);
-                            if (!type_ok) continue;
+                            if (page_idx >= probe_col.pages.size()) break;
+                            
+                            const auto* page = probe_col.pages[page_idx].get();
+                            size_t count = std::min(end - cur, PAGE_CAPACITY - offset);
 
-                            T key;
-                            if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
-
-                            hash_table.lookup(key, [&](size_t build_idx) {
-                                size_t left_idx  = build_left ? build_idx : current_probe_idx;
-                                size_t right_idx = build_left ? current_probe_idx : build_idx;
-                                materialize_fn(local_res, left_idx, right_idx);
-                            });
+                            for(size_t i=0; i<count; ++i) {
+                                value_t cell = page->data[offset + i];
+                                if (!cell.is_null()) {
+                                    T key = static_cast<T>(cell.get_int());
+                                    
+                                    hash_table.lookup(key, [&](size_t build_idx) {
+                                        size_t cur_idx = cur + i;
+                                        materialize_fn(local_res, build_left ? build_idx : cur_idx, 
+                                                                  build_left ? cur_idx : build_idx);
+                                    });
+                                }
+                            }
+                            cur += count;
                         }
                     }
                 }
             });
         }
-
-        for (auto& t : threads) t.join();
+        for(auto& t : threads) t.join();
         return thread_results;
     }
 
