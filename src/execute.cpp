@@ -3,121 +3,117 @@
 #include <hopscotch_hash.h>
 #include <table.h>
 #include "indexing.h"
-
-#include "hopscotch_hash.h"
-#include "robin_hood_hash_map.h"
-#include "cuckoo_hash_map.h"
-#include "int_hasher.h"
 #include <stdexcept>
 #include <variant>
+#include <thread>
+#include <atomic>
+#include <mutex>
 #include "unchained_map.h"
 
 namespace Contest {
 
-enum class JoinStrategy {
-    STD_UNORDERED_MAP, 
-    HOPSCOTCH,         // Panagiotis Papapostolou
-    ROBIN_HOOD,        // Theodoros Mpeioglou
-    CUCKOO             // Stratis Charisiadis-Roussis
-};
-
-// Choose join strategy here
-constexpr JoinStrategy CURRENT_STRATEGY = JoinStrategy::HOPSCOTCH;
-
-// --- CHANGED TO COLUMN STORE ---
 using ExecuteResult = std::vector<column_t>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Helper function definition
+// Helper: Materializes a StringRef into a standard std::string.
+// Handles potentially segmented (long) strings across pages.
 static std::string materialize_string_from_value(const Plan& plan, const value_t& vv) {
-    if (!vv.is_string()) {
-        throw std::runtime_error("materialize_string on non-string value");
-    }
     auto sref = vv.get_stringref();
     if (sref.is_null()) return std::string();
+    
     auto table_id = sref.table_id();
     auto col_id = sref.column_id();
     auto page_id = sref.page_id();
     auto off = sref.offset();
     const auto& column = plan.inputs[table_id].columns[col_id];
     
-    // handle long strings
     if (sref.is_long()) {
         std::string out;
         size_t idx = page_id;
         while (idx < column.pages.size()) {
             auto* page = column.pages[idx]->data;
             auto num_rows = *reinterpret_cast<uint16_t*>(page);
+            
+            // Check for continuation or end
             if (num_rows != 0xffff && num_rows != 0xfffe) break;
+            
             auto num_chars = *reinterpret_cast<uint16_t*>(page + 2);
             auto* data_begin = reinterpret_cast<char*>(page + 4);
             out.append(data_begin, data_begin + num_chars);
+            
             ++idx;
-            if (num_rows == 0xfffe) continue;
+            if (num_rows == 0xfffe) continue; // Continuation page
         }
         return out;
     } else {
-        // normal short string in single page
+        // Short string optimization: Contained within a single page
         auto* page = column.pages[page_id]->data;
         auto num_non_null = *reinterpret_cast<uint16_t*>(page + 2);
+        // Skip header and bitmask
         auto* data_begin = reinterpret_cast<char*>(page + 4 + num_non_null * 2);
+        
         uint32_t start = static_cast<uint32_t>(off >> 16);
         uint32_t len = static_cast<uint32_t>(off & 0xFFFF);
         return std::string(data_begin + start, data_begin + start + len);
     }
 }
 
-
-
+// Wrapper for writing to columnar tables during Root Join materialization
 struct ColumnWriter {
     std::unique_ptr<Column> col;
     std::unique_ptr<ColumnInserter<int32_t>> int_inserter;
     std::unique_ptr<ColumnInserter<std::string>> str_inserter;
     DataType type;
 
+    void (ColumnWriter::*add_val_impl)(const value_t&, const Plan&) = nullptr;
+    void (ColumnWriter::*finalize_impl)() = nullptr;
+
     ColumnWriter() = default; 
-    
     ColumnWriter(ColumnWriter&&) = default;
     ColumnWriter& operator=(ColumnWriter&&) = default;
-
-    void reserve(size_t) {}
 
     void init(DataType t) {
         type = t;
         col = std::make_unique<Column>(t);
         if (t == DataType::INT32) {
             int_inserter = std::make_unique<ColumnInserter<int32_t>>(*col);
+            add_val_impl = &ColumnWriter::add_val_int;
+            finalize_impl = &ColumnWriter::finalize_int;
         } else {
             str_inserter = std::make_unique<ColumnInserter<std::string>>(*col);
+            add_val_impl = &ColumnWriter::add_val_str;
+            finalize_impl = &ColumnWriter::finalize_str;
         }
     }
 
-    // Insert data directly into the binary page format
     void add_val(const value_t& v, const Plan& plan) {
-        if (v.is_null()) {
-            if (type == DataType::INT32) int_inserter->insert_null();
-            else str_inserter->insert_null();
-        } else {
-            if (type == DataType::INT32) {
-                int_inserter->insert(v.get_int());
-            } else {
-                // We still need to materialize the string to copy it into the page.
-                // However, we avoid storing it in a variant or vector<string>.
-                std::string s = materialize_string_from_value(plan, v);
-                str_inserter->insert(s);
-            }
-        }
+        (this->*add_val_impl)(v, plan);
     }
-
+    
     void finalize() {
         if (col) {
-            if (type == DataType::INT32) int_inserter->finalize();
-            else str_inserter->finalize();
+            (this->*finalize_impl)();
         }
     }
+
+private:
+    void add_val_int(const value_t& v, const Plan& plan) {
+        if (v.is_null()) int_inserter->insert_null();
+        else int_inserter->insert(v.get_int());
+    }
+    
+    void add_val_str(const value_t& v, const Plan& plan) {
+        if (v.is_null()) str_inserter->insert_null();
+        else str_inserter->insert(materialize_string_from_value(plan, v));
+    }
+    
+    void finalize_int() { int_inserter->finalize(); }
+    void finalize_str() { str_inserter->finalize(); }
 };
 
+// Merges thread-local results into the final result columns.
+// Uses parallel copying if the dataset size exceeds PARALLEL_THRESHOLD.
 static void parallel_merge_columns(
     std::vector<column_t>& results,
     const std::vector<ExecuteResult>& thread_results,
@@ -125,11 +121,8 @@ static void parallel_merge_columns(
 {
     size_t num_threads = thread_results.size();
     
-    // We calculate offsets.
-    // offsets[col][thread_id] = start_index_in_global_column
+    // offsets[col][thread_id] = global_start_index
     std::vector<std::vector<size_t>> offsets(num_output_cols, std::vector<size_t>(num_threads + 1, 0));
-    
-    // Check total rows in the first column to decide strategy.
     size_t total_rows_any = 0;
 
     for (size_t c = 0; c < num_output_cols; ++c) {
@@ -144,8 +137,7 @@ static void parallel_merge_columns(
         if (c == 0) total_rows_any = accum;
     }
 
-    // Allocate Pages.
-    // We do this serially regardless, as page allocation is fast but allocation contention is bad.
+    // Pre-allocate Pages serially to avoid allocation contention
     for (size_t c = 0; c < num_output_cols; ++c) {
         size_t total_items = offsets[c][num_threads];
         results[c].total_items = total_items;
@@ -158,8 +150,6 @@ static void parallel_merge_columns(
         }
     }
 
-    // Thread creation overhead is ~20-50us. Copying 10k rows is often faster than that.
-    // Only parallelize if we have > 32k rows (approx 8 pages).
     const size_t PARALLEL_THRESHOLD = 8192; 
 
     auto run_copy_task = [&](size_t t_start, size_t t_end) {
@@ -178,7 +168,6 @@ static void parallel_merge_columns(
                     size_t dst_idx = global_start + i;
                     size_t page_idx = dst_idx / PAGE_CAPACITY;
                     size_t page_off = dst_idx % PAGE_CAPACITY;
-                    
                     results[c].pages[page_idx]->data[page_off] = src_col[i];
                 }
             }
@@ -189,7 +178,6 @@ static void parallel_merge_columns(
         run_copy_task(0, num_threads);
     } else {
         std::vector<std::thread> workers;
-        
         for (size_t t = 0; t < num_threads; ++t) {
             workers.emplace_back([&, t]() {
                 run_copy_task(t, t + 1);
@@ -199,89 +187,9 @@ static void parallel_merge_columns(
     }
 }
 
+// Logic shared between standard Join and Root Join
 struct JoinLogic{
-    // I was getting tired of seeing the same code in join and in join root, 
-    // so it was time to create some shared functions.
-
-    // ResultContainer is where we store the results
-    // MaterializeFn is a lambda.
-    // template <typename T, typename ResultContainer, typename MaterializeFn>
-    // static std::vector<ResultContainer> run_probe(
-    //     UnchainedHashMap<T, size_t>& hash_table,
-    //     ExecuteResult& probe_table,
-    //     size_t probe_col_idx,
-    //     bool build_left,
-    //     size_t num_output_cols,
-    //     MaterializeFn&& materialize_fn
-    // ) 
-    // {
-    //     // Parallel probing configuration.
-    //     size_t num_threads = std::thread::hardware_concurrency();
-    //     std::vector<ResultContainer> thread_results(num_threads);
-    //     std::vector<std::thread> threads;
-
-    //     auto& probe_col_obj = probe_table[probe_col_idx];
-    //     size_t total_rows = probe_col_obj.size();
-
-    //     // We tried various batching strategies here, none really stood out.
-    //     // We got miniscule speed improvements.
-    //     std::atomic<size_t> next_batch_idx{0};
-    //     const size_t BATCH_SIZE = PAGE_CAPACITY * 4; 
-
-    //     for(size_t t=0; t < num_threads; ++t){
-
-    //         // Initialize buffers.
-    //         if constexpr (std::is_same_v<ResultContainer, ExecuteResult>) {
-    //             thread_results[t].resize(num_output_cols);
-    //         } else {
-    //             thread_results[t].resize(num_output_cols);
-    //             for(auto& col : thread_results[t]) col.reserve(PAGE_CAPACITY); 
-    //         }
-
-    //         threads.emplace_back([&, t]() {
-    //             auto& local_res = thread_results[t];
-
-    //             while (true) {
-    //                 // Claim batch.
-    //                 size_t start = next_batch_idx.fetch_add(BATCH_SIZE, std::memory_order_relaxed);
-                    
-    //                 if (start >= total_rows) break; // No work left
-
-    //                 size_t end = std::min(start + BATCH_SIZE, total_rows);
-
-    //                 // Process Batch.
-    //                 for (size_t global_idx = start; global_idx < end; global_idx += PAGE_CAPACITY) {
-    //                     size_t limit = std::min(PAGE_CAPACITY, end - global_idx);
-                        
-    //                     // Inner loop over the page/chunk.
-    //                     for (size_t i = 0; i < limit; ++i) {
-    //                         size_t current_probe_idx = global_idx + i;
-    //                         value_t cell = probe_col_obj[current_probe_idx];
-
-    //                         if (cell.is_null()) continue;
-                            
-    //                         bool type_ok = true;
-    //                         if constexpr (std::is_same_v<T, int32_t>) type_ok = (cell.type() == value_t::Type::INT32);
-    //                         if (!type_ok) continue;
-
-    //                         T key;
-    //                         if constexpr (std::is_same_v<T, int32_t>) key = static_cast<T>(cell.get_int());
-
-    //                         hash_table.lookup(key, [&](size_t build_idx) {
-    //                             size_t left_idx  = build_left ? build_idx : current_probe_idx;
-    //                             size_t right_idx = build_left ? current_probe_idx : build_idx;
-    //                             materialize_fn(local_res, left_idx, right_idx);
-    //                         });
-    //                     }
-    //                 }
-    //             }
-    //         });
-    //     }
-
-    //     for (auto& t : threads) t.join();
-    //     return thread_results;
-    // }
-
+    
     template <typename T, typename ResultContainer, typename MaterializeFn>
     static std::vector<ResultContainer> run_probe(
         UnchainedHashMap<T, size_t>& hash_table,
@@ -296,8 +204,6 @@ struct JoinLogic{
         std::vector<ResultContainer> thread_results(num_threads);
         std::vector<std::thread> threads;
 
-        // FIX: Access vector element directly.
-        // ExecuteResult is std::vector<column_t>, so use probe_table[idx]
         auto& probe_col = probe_table[probe_col_idx];
         size_t total_rows = probe_col.total_items; 
 
@@ -309,15 +215,6 @@ struct JoinLogic{
                 thread_results[t].resize(num_output_cols);
             } else {
                 thread_results[t].resize(num_output_cols);
-                // FIX: Reverted to 'reserve' instead of 'init'.
-                // The lambda in execute_hash_join_root handles type initialization.
-                // We assume ResultContainer (ColumnWriter) has a reserve method, 
-                // as seen in your original code.
-                for(auto& col : thread_results[t]) {
-                     // Using PAGE_CAPACITY (4096) as in your original code
-                     // col.reserve(4096); 
-                     // Note: If ColumnWriter doesn't have reserve, you can comment this out.
-                }
             }
 
             threads.emplace_back([&, t]() {
@@ -328,9 +225,8 @@ struct JoinLogic{
                     if (start >= total_rows) break;
                     size_t end = std::min(start + BATCH_SIZE, total_rows);
 
-                    // --- VIEW PATH (Optimized) ---
+                    // Optimization: If using view pages, we can prefetch and process blocks
                     if (probe_col.is_view) {
-                        // Binary search for start page
                         auto it = std::upper_bound(probe_col.view_page_offsets.begin(), 
                                                    probe_col.view_page_offsets.end(), start);
                         size_t page_idx = (it == probe_col.view_page_offsets.begin()) 
@@ -348,20 +244,17 @@ struct JoinLogic{
                             size_t work_end = std::min(end, page_end);
 
                             if (work_start < work_end) {
-                                // Skip 4-byte header [rows:u16][non-null:u16]
                                 const int32_t* data = reinterpret_cast<const int32_t*>(raw_page + 4);
                                 size_t offset = work_start - page_start;
                                 size_t count = work_end - work_start;
 
                                 for (size_t i = 0; i < count; ++i) {
-                                    // PREFETCHING: Look ahead to hide latency
                                     if (i + 4 < count) { 
                                         hash_table.prefetch_directory(data[offset + i + 4]);
                                     }
                                     
                                     T key = static_cast<T>(data[offset + i]);
                                     
-                                    // Lookup
                                     hash_table.lookup(key, [&](size_t build_idx) {
                                         size_t cur_idx = work_start + i;
                                         materialize_fn(local_res, build_left ? build_idx : cur_idx, 
@@ -372,8 +265,8 @@ struct JoinLogic{
                             page_idx++;
                         }
                     } 
-                    // --- MATERIALIZED PATH (Standard) ---
                     else {
+                        // Standard page iteration
                         constexpr size_t PAGE_CAPACITY = 4096;
                         size_t cur = start;
                         while(cur < end) {
@@ -406,88 +299,6 @@ struct JoinLogic{
         for(auto& t : threads) t.join();
         return thread_results;
     }
-
-    // For root join.
-    template <typename InnerType>
-    static void parallel_merge_vectors(
-        // [thread][col][row]
-        std::vector<std::vector<std::vector<InnerType>>>& thread_results, 
-        // [col][row]
-        std::vector<std::vector<InnerType>>& global_results,              
-        size_t num_cols
-    )
-    {
-        size_t num_src_threads = thread_results.size();
-        
-        // We need to know where every chunk goes before we can parallelize the copy.
-        std::vector<std::vector<size_t>> thread_offsets(num_cols, std::vector<size_t>(num_src_threads + 1, 0));
-        
-        for (size_t c = 0; c < num_cols; ++c) {
-            size_t current_size = 0;
-            for (size_t t = 0; t < num_src_threads; ++t) {
-                thread_offsets[c][t] = current_size;
-                current_size += thread_results[t][c].size();
-            }
-            // Allocate the final memory once.
-            global_results[c].resize(current_size);
-        }
-
-        
-        // Instead of 1 task per thread, we split large buffers into chunks.
-        // This handles skew: if Thread 0 has 10M rows, it generates many tasks 
-        // that Threads 1..N can help process.
-        struct CopyTask {
-            size_t src_thread_idx;
-            size_t col_idx;
-            size_t src_offset;
-            size_t dst_offset;
-            size_t count;
-        };
-
-        std::vector<CopyTask> tasks;
-        
-        const size_t CHUNK_SIZE = 16384;
-
-        for (size_t c = 0; c < num_cols; ++c) {
-            for (size_t t = 0; t < num_src_threads; ++t) {
-                size_t total_items = thread_results[t][c].size();
-                if (total_items == 0) continue;
-
-                size_t start_dst = thread_offsets[c][t];
-
-                for (size_t i = 0; i < total_items; i += CHUNK_SIZE) {
-                    size_t count = std::min(CHUNK_SIZE, total_items - i);
-                    tasks.push_back({t, c, i, start_dst + i, count});
-                }
-            }
-        }
-
-        // Copy in parallel (with work stealing).
-        size_t num_worker_threads = std::thread::hardware_concurrency();
-        std::vector<std::thread> workers;
-        std::atomic<size_t> next_task_idx{0};
-
-        for (size_t w = 0; w < num_worker_threads; ++w) {
-            workers.emplace_back([&]() {
-                while (true) {
-                    // Worker gets task.
-                    size_t task_id = next_task_idx.fetch_add(1, std::memory_order_relaxed);
-                    if (task_id >= tasks.size()) break;
-
-                    const auto& task = tasks[task_id];
-                    auto& src_vec = thread_results[task.src_thread_idx][task.col_idx];
-                    auto& dst_vec = global_results[task.col_idx];
-
-                    // Move/Copy. We take the tuples from thread_results and copy them in global.
-                    std::copy(std::make_move_iterator(src_vec.begin() + task.src_offset), 
-                              std::make_move_iterator(src_vec.begin() + task.src_offset + task.count), 
-                              dst_vec.begin() + task.dst_offset);
-                }
-            });
-        }
-
-        for (auto& w : workers) w.join();
-    }
 };
 
 struct JoinAlgorithm {
@@ -505,20 +316,18 @@ struct JoinAlgorithm {
 
     template <class T>
     auto run() {
-        namespace views = ranges::views;
-
         UnchainedHashMap<T, size_t> hash_table;
 
-        // Build side:
+        // Build Phase
         ExecuteResult& build_table = build_left ? left : right;
         size_t build_idx = build_left ? left_col : right_col;
         hash_table.build(build_table, build_idx);
 
+        // Probe Phase
         ExecuteResult& probe_table = build_left ? right : left;
         size_t probe_idx = build_left ? right_col : left_col;
         size_t left_table_cols = left.size();
 
-        // parallel probe:
         auto thread_results = JoinLogic::run_probe<T, ExecuteResult>(
             hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
             [&](ExecuteResult& local, size_t l_idx, size_t r_idx) {
@@ -533,9 +342,9 @@ struct JoinAlgorithm {
             }
         );
 
+        // Merge Phase
         results.resize(output_attrs.size());
         parallel_merge_columns(results, thread_results, output_attrs.size());
-
     }
 };
 
@@ -554,11 +363,10 @@ ExecuteResult execute_hash_join(const Plan& plan,
     auto left  = execute_impl(plan, left_idx);
     auto right = execute_impl(plan, right_idx);
 
-    // Prepare Result Columns
     ExecuteResult results;
     results.reserve(output_attrs.size());
     for(size_t i = 0; i < output_attrs.size(); ++i) {
-        results.emplace_back(); // Constructs an empty column_t
+        results.emplace_back(); 
     }
 
     JoinAlgorithm join_algorithm{
@@ -575,20 +383,17 @@ ExecuteResult execute_hash_join(const Plan& plan,
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
             case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-            // case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
             default: throw std::runtime_error("unsupported join key type");
         }
     } else {
         switch (std::get<1>(right_types[join.right_attr])) {
             case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-            // case DataType::VARCHAR: join_algorithm.run<std::string, std::hash<std::string>>(); break;
             default: throw std::runtime_error("unsupported join key type");
         }
     }
 
     return results;
 }
-
 
 ColumnarTable execute_hash_join_root(const Plan& plan,
                                      const JoinNode& join,
@@ -599,8 +404,6 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     auto& left_types  = plan.nodes[join.left].output_attrs;
     auto& right_types = plan.nodes[join.right].output_attrs;
 
-    // std::vector<std::vector<Data>> final_columns(output_attrs.size());
-    // for(auto& col : final_columns) col.reserve(1024); 
     using RootResultType = std::vector<ColumnWriter>;
 
     auto run_root_join = [&](auto type_tag) -> ColumnarTable {
@@ -608,7 +411,6 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
 
         UnchainedHashMap<T, size_t> hash_table;
 
-        // build
         ExecuteResult& build_table = join.build_left ? left : right;
         size_t build_col_idx = join.build_left ? join.left_attr : join.right_attr;
         
@@ -618,12 +420,10 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
         size_t probe_idx = join.build_left ? join.right_attr : join.left_attr;
         size_t left_table_cols = left.size();
         
-        // parallel probe
         auto thread_results = JoinLogic::run_probe<T, RootResultType>(
             hash_table, probe_table, probe_idx, join.build_left, output_attrs.size(),
             [&](RootResultType& writers, size_t l_idx, size_t r_idx) {
                 
-                // Initialize writers on first use for this thread
                 if (writers.empty()) writers.resize(output_attrs.size());
                 if (!writers[0].col) {
                     for(size_t i=0; i<output_attrs.size(); ++i) {
@@ -643,13 +443,11 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
             }
         );
 
-        // Merge Phase: Concatenate pages from thread-local columns to the final table
         ColumnarTable result_table;
         result_table.columns.reserve(output_attrs.size());
         
         for (size_t col_idx = 0; col_idx < output_attrs.size(); ++col_idx) {
             DataType type = std::get<1>(output_attrs[col_idx]);
-            // Emplace returns reference to the new column
             result_table.columns.emplace_back(type);
             Column& global_col = result_table.columns.back();
             
@@ -657,13 +455,8 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                 if (col_idx >= t_vec.size()) continue;
                 auto& writer = t_vec[col_idx];
                 
-                // If this thread processed any rows
                 if (writer.col) {
-                    writer.finalize(); // Flush last page
-                    
-                    // Steal pages: move ptrs from writer to global
-                    // Column destructor deletes pages, so we must clear the writer's vector 
-                    // after copying pointers to avoid double free.
+                    writer.finalize(); 
                     global_col.pages.insert(global_col.pages.end(), 
                                             writer.col->pages.begin(), 
                                             writer.col->pages.end());
@@ -672,7 +465,6 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
             }
         }
         
-        // Calculate total rows from the first column (if exists)
         if (!result_table.columns.empty()) {
             size_t rows = 0;
             for (auto* page : result_table.columns[0].pages) {
@@ -695,7 +487,6 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     } else {
         throw std::runtime_error("Unsupported join key type in root join");
     }
-
 }
 
 
@@ -709,15 +500,16 @@ ExecuteResult execute_scan(const Plan& plan,
     ExecuteResult results;
     results.resize(output_attrs.size());
     
-    // Iterate serially (Fastest for memory-bound tasks)
     for (size_t out_col = 0; out_col < output_attrs.size(); ++out_col) {
         auto in_col_idx = std::get<0>(output_attrs[out_col]);
         auto& column    = input.columns[in_col_idx];
         auto& target_col = results[out_col];
 
-        // -------------------------------------------------------
-        // 1. Zero-Copy View Optimization (INT32 only)
-        // -------------------------------------------------------
+        // =========================================================
+        // ZERO-COPY VIEW OPTIMIZATION
+        // =========================================================
+        // If the column has no nulls and is INT32, we can reuse the 
+        // raw page buffers directly without copying data.
         if (column.type == DataType::INT32) {
             bool all_no_nulls = true;
             size_t total_items = 0;
@@ -737,9 +529,7 @@ ExecuteResult execute_scan(const Plan& plan,
             }
         }
 
-        // -------------------------------------------------------
-        // 2. Pre-calculate Size & Allocate
-        // -------------------------------------------------------
+        // Standard Copy Path
         size_t total_rows = 0;
         for (auto* p : column.pages) {
             uint16_t n = *reinterpret_cast<uint16_t*>(p->data);
@@ -755,12 +545,8 @@ ExecuteResult execute_scan(const Plan& plan,
             target_col.pages.push_back(std::make_unique<ColPage>());
         }
 
-        // -------------------------------------------------------
-        // 3. Serial Direct Write (No push_back overhead)
-        // -------------------------------------------------------
         size_t current_row = 0;
         size_t page_idx = 0; 
-        // Cache the pointer to the current destination page
         ColPage* curr_target_page = num_pages > 0 ? target_col.pages[0].get() : nullptr;
 
         for (size_t src_p_idx = 0; src_p_idx < column.pages.size(); ++src_p_idx) {
@@ -777,12 +563,10 @@ ExecuteResult execute_scan(const Plan& plan,
                 continue; 
             }
 
-            // Pointers for reading source data
             auto* int_data = reinterpret_cast<int32_t*>(page + 4);
             auto* str_offsets = reinterpret_cast<uint16_t*>(page + 4);
             auto* bitmap = reinterpret_cast<uint8_t*>(page + PAGE_SIZE - (num_logical_rows + 7) / 8);
 
-            // Current writing position within the page
             size_t in_page_idx = current_row % PAGE_CAPACITY;
 
             if (column.type == DataType::INT32) {
@@ -794,7 +578,6 @@ ExecuteResult execute_scan(const Plan& plan,
 
                     curr_target_page->data[in_page_idx++] = v;
                     
-                    // Handle page boundary
                     if (in_page_idx == PAGE_CAPACITY) {
                         if (++page_idx < num_pages) curr_target_page = target_col.pages[page_idx].get();
                         in_page_idx = 0;
@@ -803,9 +586,12 @@ ExecuteResult execute_scan(const Plan& plan,
             } else if (column.type == DataType::VARCHAR) {
                 if (is_long_start) {
                      auto num_chars = *reinterpret_cast<uint16_t*>(page + 2);
-                     StringRef s{static_cast<uint8_t>(table_id), static_cast<uint8_t>(in_col_idx), static_cast<uint16_t>(src_p_idx), static_cast<uint32_t>(num_chars), true};
-                     
+
+                     StringRef s{static_cast<uint8_t>(table_id), static_cast<uint8_t>(in_col_idx), 
+                                static_cast<uint16_t>(src_p_idx), static_cast<uint32_t>(num_chars), true};
+
                      curr_target_page->data[in_page_idx++] = value_t(s);
+
                      if (in_page_idx == PAGE_CAPACITY) {
                         if (++page_idx < num_pages) curr_target_page = target_col.pages[page_idx].get();
                         in_page_idx = 0;
@@ -820,7 +606,8 @@ ExecuteResult execute_scan(const Plan& plan,
                             uint32_t len = static_cast<uint32_t>(end_off) - prev_end;
                             uint32_t packed = (prev_end << 16) | (len & 0xFFFF);
                             prev_end = end_off;
-                            StringRef s{static_cast<uint8_t>(table_id), static_cast<uint8_t>(in_col_idx), static_cast<uint16_t>(src_p_idx), packed, false};
+                            StringRef s{static_cast<uint8_t>(table_id), static_cast<uint8_t>(in_col_idx), 
+                                        static_cast<uint16_t>(src_p_idx), packed, false};
                             v = value_t(s);
                         } else {
                             v = value_t();
@@ -855,8 +642,6 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 }
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    namespace views = ranges::views;
-
     auto& root_node = plan.nodes[plan.root];
     auto& j = std::get<JoinNode>(root_node.data);
     return execute_hash_join_root(plan, j, root_node.output_attrs);
