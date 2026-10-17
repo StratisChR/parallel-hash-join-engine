@@ -29,3 +29,8 @@ inline uint64_t hash64(uint64_t key, uint32_t seed1, uint32_t seed2) {
     uint64_t combined = upper | crc1;
     return combined * k;
 }
+
+inline uint64_t fibonacci_hash(uint64_t key) {
+    const uint64_t k = 11400714819323198485ULL;
+    return key * k;
+}
