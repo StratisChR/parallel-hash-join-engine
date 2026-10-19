@@ -140,7 +140,7 @@ static void parallel_merge_columns(
         
         results[c].pages.reserve(num_pages);
         for(size_t p=0; p<num_pages; ++p) {
-            results[c].pages.push_back(std::make_unique<ColPage>());
+            results[c].pages.push_back(acquire_page());
         }
     }
 
@@ -525,7 +525,7 @@ ExecuteResult execute_scan(const Plan& plan,
         size_t num_pages = (total_rows + PAGE_CAPACITY - 1) / PAGE_CAPACITY;
         target_col.pages.reserve(num_pages);
         for(size_t i=0; i<num_pages; ++i) {
-            target_col.pages.push_back(std::make_unique<ColPage>());
+            target_col.pages.push_back(acquire_page());
         }
 
         size_t current_row = 0;

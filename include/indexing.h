@@ -6,6 +6,7 @@
 #include <memory>
 #include <iterator>
 #include <cassert>
+#include <mutex>
 #include "attribute.h"
 
 // forward-declare Page from plan.h so column_t can hold views to input pages
@@ -111,11 +112,56 @@ struct ColPage {
     value_t data[PAGE_CAPACITY];
 };
 
+// Process-wide stock of result pages. A page released by a finished join goes back
+// here and is handed to the next join instead of being freed and malloc'd again.
+// A reused page still holds old values; that is fine because every user writes
+// each slot before reading it (columns only read indices below total_items).
+class PagePool {
+public:
+    static PagePool& instance() {
+        static PagePool p;
+        return p;
+    }
+
+    ColPage* get() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!free_.empty()) {
+                ColPage* p = free_.back();
+                free_.pop_back();
+                return p;
+            }
+        }
+        return new ColPage;
+    }
+
+    void put(ColPage* p) {
+        std::lock_guard<std::mutex> lk(m_);
+        free_.push_back(p);
+    }
+
+    ~PagePool() {
+        for (ColPage* p : free_) delete p;
+    }
+
+private:
+    std::mutex            m_;
+    std::vector<ColPage*> free_;
+};
+
+// unique_ptr deleter that returns the page to the pool instead of deleting it.
+struct PageReturner {
+    void operator()(ColPage* p) const { PagePool::instance().put(p); }
+};
+using PagePtr = std::unique_ptr<ColPage, PageReturner>;
+
+inline PagePtr acquire_page() { return PagePtr(PagePool::instance().get()); }
+
 class column_t {
 public:
 
     // Owned materialized pages (value_t arrays)
-    std::vector<std::unique_ptr<ColPage>> pages;
+    std::vector<PagePtr> pages;
 
     // View into existing Plan::Page buffers (non-owning). Stored as raw
     // pointers to the page data (`std::byte*`) so we don't need the full
@@ -142,7 +188,7 @@ public:
     void push_back(const value_t& val) {
         size_t offset = total_items % PAGE_CAPACITY;
         if (offset == 0) {
-            pages.push_back(std::make_unique<ColPage>());
+            pages.push_back(acquire_page());
         }
         pages.back()->data[offset] = val;
         total_items++;
