@@ -37,6 +37,7 @@ private:
 
     static constexpr size_t SMALL_CHUNK = 4096;
     static constexpr size_t HUGE_CHUNK = 2 * 1024 * 1024;
+    static_assert(HUGE_CHUNK == ChunkPool::CHUNK_SIZE, "slab chunk size mismatch");
 
     std::vector<uint64_t> directory_mem;
     uint64_t* directory;
