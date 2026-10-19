@@ -19,7 +19,7 @@ void UnchainedHashMap<Key, Value>::collect(size_t start_index,
         // uint64_t hash = fibonacci_hash(static_cast<uint64_t>(key));
         uint64_t partition_id = hash >> tls.partition_shift;
 
-        if (!level3[partition_id].hasSpace(sizeof(Tuple))) {
+        if (!level3[partition_id].hasSpace(sizeof(BuildTuple))) {
             if (!level2.hasSpace(SMALL_CHUNK)) {
                 void* huge_mem = level1.allocate_large_chunk();
                 level2.addSpace(huge_mem, HUGE_CHUNK);
@@ -28,10 +28,10 @@ void UnchainedHashMap<Key, Value>::collect(size_t start_index,
             level3[partition_id].addSpace(small_mem, SMALL_CHUNK);
         }
 
-        Tuple* t = (Tuple*)level3[partition_id].allocate(sizeof(Tuple));
-        t->key = key;
-        t->hash_high = static_cast<uint32_t>(hash >> 32);
-        t->index = row_idx; 
+        BuildTuple* t = (BuildTuple*)level3[partition_id].allocate(sizeof(BuildTuple));
+        t->key  = key;
+        t->row  = static_cast<uint32_t>(row_idx);
+        t->hash = hash;
         
         tls.counts[partition_id]++;
     };
@@ -144,16 +144,12 @@ void UnchainedHashMap<Key, Value>::count_and_copy(  // size_t starting_partition
                                     ? (size_t)(allocator.ptr - chunk->data) 
                                     : CHUNK_DATA_CAPACITY;
                 
-                size_t num_tuples = bytes_used / sizeof(Tuple);
-                Tuple* tuples = reinterpret_cast<Tuple*>(chunk->data);
+                size_t num_tuples = bytes_used / sizeof(BuildTuple);
+                BuildTuple* tuples = reinterpret_cast<BuildTuple*>(chunk->data);
 
                 for (size_t i = 0; i < num_tuples; ++i) {
 
-                    // uint64_t hash = hashed_keys[tuples[i].index];
-                    // uint64_t slot = get_slot(hash);
-                    // I want to avoid the above commented out code.
-                    uint64_t hash_approx = (static_cast<uint64_t>(tuples[i].hash_high) << 32);
-                    uint64_t slot = get_slot(hash_approx);
+                    uint64_t slot = get_slot(tuples[i].hash);
                     directory[slot]++; 
                 }
                 chunk = chunk->next;
@@ -186,25 +182,23 @@ void UnchainedHashMap<Key, Value>::count_and_copy(  // size_t starting_partition
                                     ? (size_t)(allocator.ptr - chunk->data) 
                                     : CHUNK_DATA_CAPACITY; 
 
-                size_t num_tuples = bytes_used / sizeof(Tuple);
-                Tuple* tuples = reinterpret_cast<Tuple*>(chunk->data);
+                size_t num_tuples = bytes_used / sizeof(BuildTuple);
+                BuildTuple* tuples = reinterpret_cast<BuildTuple*>(chunk->data);
 
                 for (size_t i = 0; i < num_tuples; ++i) {
-                    // uint64_t hash = hashed_keys[tuples[i].index];
-                    uint64_t hash_approx = (static_cast<uint64_t>(tuples[i].hash_high) << 32);
-                    uint64_t slot = get_slot(hash_approx);
+                    uint64_t slot = get_slot(tuples[i].hash);
                     
                     // Write position.
                     uint64_t write_idx = directory[slot] >> 16;
                     
                     // Write to final array.
-                    data[write_idx] = {tuples[i].key, tuples[i].hash_high, tuples[i].index};
+                    data[write_idx] = {tuples[i].key, tuples[i].row};
                     
                     // Increment pointer.
                     directory[slot] += (1ULL << 16);
                     
                     // Update Bloom Filter.
-                    directory[slot] |= compute_bloom_bits(tuples[i].hash_high); 
+                    directory[slot] |= compute_bloom_bits(tuples[i].hash);
                 }
                 chunk = chunk->next;
             }

@@ -11,3 +11,5 @@ cache/
 imdb.db
 imdb.tgz
 imdb/
+build-prof/
+perf.data*

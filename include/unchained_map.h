@@ -12,6 +12,7 @@
 #include "ex2_task3_bloom.h"
 #include "indexing.h"
 #include "unchnd_structs.h" 
+#include "threads.h"
 
 /*  Hash Map Implementation:
     In the second Assignment we had created the unchained hashmap in the wrong way.
@@ -39,7 +40,7 @@ private:
 
     std::vector<uint64_t> directory_mem;
     uint64_t* directory;
-    std::vector<Tuple> data;
+    std::vector<StoredTuple> data;
 
     size_t num_elements;      
     size_t capacity;          

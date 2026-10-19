@@ -25,18 +25,12 @@ inline uint16_t compute_bloom_bits_separately(uint64_t hash){
 
 // We compute once and save time from recomputing bloom tags every time.
 // It doesn't matter if it is not EXACTLY 4 bits per tag.
-inline void precompute_bloom_tags(){
-    for (int i = 0; i < 2048; i++) {
-        uint16_t pattern = 0;
-        
-        // We set, approximately, 4 bits per tag.
-        pattern |= (1u << ((i * 7) & 0xF));
-        pattern |= (1u << ((i * 13) & 0xF));
-        pattern |= (1u << ((i * 19) & 0xF));
-        pattern |= (1u << ((i * 23) & 0xF));
-        
-        bloom_tags[i] = pattern;
-    }
+inline void precompute_bloom_tags() {
+    size_t n = 0;
+    for (uint32_t m = 0; m < 65536; ++m)
+        if (__builtin_popcount(m) == 4) bloom_tags[n++] = m;   // n == 1820
+    std::mt19937 rng(42);
+    for (size_t i = n; i < 2048; ++i) bloom_tags[i] = bloom_tags[rng() % 1820];
 }
 
 // We get 11 bits from the hash, and use it to index 

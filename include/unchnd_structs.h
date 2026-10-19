@@ -13,13 +13,18 @@ struct SegmentCache {
 };
 
 // The struct our 3 slab allocator uses to save tuples.
-// I added 'hash_high' because we already have a padding, so it doesn't 
-// take more space, but possibly helps because we can get rid of 'hashed_keys'.
-struct Tuple{
-    int32_t key;
-    uint32_t hash_high;
-    uint64_t index;
+struct BuildTuple{
+    int32_t  key;
+    uint32_t row;
+    uint64_t hash;
 };
+
+// What the final adjacency array stores: only what a probe reads.
+struct StoredTuple {
+    int32_t  key;
+    uint32_t row;
+};
+static_assert(sizeof(StoredTuple) == 8);
 
 // Thread local state for parallel building. Contains all the useful 
 // info our threads need to function.

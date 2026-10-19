@@ -9,6 +9,7 @@
 #include <atomic>
 #include <mutex>
 #include "unchained_map.h"
+#include "threads.h"
 
 namespace Contest {
 
@@ -31,20 +32,13 @@ static std::string materialize_string_from_value(const Plan& plan, const value_t
     if (sref.is_long()) {
         std::string out;
         size_t idx = page_id;
-        while (idx < column.pages.size()) {
+        do {
             auto* page = column.pages[idx]->data;
-            auto num_rows = *reinterpret_cast<uint16_t*>(page);
-            
-            // Check for continuation or end
-            if (num_rows != 0xffff && num_rows != 0xfffe) break;
-            
-            auto num_chars = *reinterpret_cast<uint16_t*>(page + 2);
-            auto* data_begin = reinterpret_cast<char*>(page + 4);
-            out.append(data_begin, data_begin + num_chars);
-            
+            auto n = *reinterpret_cast<uint16_t*>(page + 2);
+            out.append(reinterpret_cast<char*>(page + 4), n);
             ++idx;
-            if (num_rows == 0xfffe) continue; // Continuation page
-        }
+        } while (idx < column.pages.size() &&
+                *reinterpret_cast<uint16_t*>(column.pages[idx]->data) == 0xfffe);
         return out;
     } else {
         // Short string optimization: Contained within a single page
@@ -177,13 +171,9 @@ static void parallel_merge_columns(
     if (total_rows_any < PARALLEL_THRESHOLD) {
         run_copy_task(0, num_threads);
     } else {
-        std::vector<std::thread> workers;
-        for (size_t t = 0; t < num_threads; ++t) {
-            workers.emplace_back([&, t]() {
-                run_copy_task(t, t + 1);
-            });
-        }
-        for (auto& w : workers) w.join();
+        pool().run([&](size_t t) {
+            if (t < num_threads) run_copy_task(t, t + 1);
+        });
     }
 }
 
@@ -200,9 +190,10 @@ struct JoinLogic{
         MaterializeFn&& materialize_fn
     ) 
     {
-        size_t num_threads = std::thread::hardware_concurrency();
+        // 3a. thread count:
+        size_t num_threads = pool().size();
         std::vector<ResultContainer> thread_results(num_threads);
-        std::vector<std::thread> threads;
+        for (auto& r : thread_results) r.resize(num_output_cols);   // was inside the spawn loop
 
         auto& probe_col = probe_table[probe_col_idx];
         size_t total_rows = probe_col.total_items; 
@@ -210,14 +201,8 @@ struct JoinLogic{
         std::atomic<size_t> next_batch_idx{0};
         const size_t BATCH_SIZE = 65536; 
 
-        for(size_t t=0; t < num_threads; ++t){
-            if constexpr (std::is_same_v<ResultContainer, ExecuteResult>) {
-                thread_results[t].resize(num_output_cols);
-            } else {
-                thread_results[t].resize(num_output_cols);
-            }
-
-            threads.emplace_back([&, t]() {
+        pool().run([&](size_t t) 
+            {
                 auto& local_res = thread_results[t];
 
                 while (true) {
@@ -295,8 +280,6 @@ struct JoinLogic{
                     }
                 }
             });
-        }
-        for(auto& t : threads) t.join();
         return thread_results;
     }
 };
@@ -647,7 +630,10 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     return execute_hash_join_root(plan, j, root_node.output_attrs);
 }
 
-void* build_context() { return nullptr; }
+void* build_context() {
+    pool();          // start the worker threads once, before any query runs
+    return nullptr;
+}
 void destroy_context([[maybe_unused]] void* context) {}
 
 } // namespace Contest

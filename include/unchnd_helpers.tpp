@@ -32,19 +32,14 @@ void UnchainedHashMap<Key, Value>::calc_capacity() {
 template <class Key, class Value>
 size_t UnchainedHashMap<Key, Value>::calc_partition_num(size_t total_rows) {
     
-    // The paper mentions heuristics include the "number of threads".
-    // So we will have at least as many partitions as threads.
-    size_t num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 8; 
-
-    constexpr size_t TUPLE_SIZE = sizeof(Tuple);
+    constexpr size_t TUPLE_SIZE = sizeof(BuildTuple);
     // Total size of build side tuples.
     size_t total_size_bytes = total_rows * TUPLE_SIZE;
     // According to the paper, we want (TotalSize / Partitions) <= L1_Size.
     size_t min_partitions = (total_size_bytes + L1_CACHE_SIZE - 1) / L1_CACHE_SIZE;
     
     // Next power of 2.
-    size_t temp = std::max(min_partitions, num_threads);
+    size_t temp = std::max({min_partitions, num_worker_threads(), size_t(2)});
     size_t final_partitions = (temp <= 1) ? 1 : 
         (1ULL << (64 - __builtin_clzll(temp - 1)));
 

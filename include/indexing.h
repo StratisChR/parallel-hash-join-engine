@@ -127,6 +127,8 @@ public:
     // map a global index -> page when in view mode. view_page_offsets[i] is
     // the starting row index of view_pages[i].
     std::vector<size_t> view_page_offsets;
+    size_t view_rows_per_page = 0;   // rows in every page except possibly the last
+    bool   view_uniform       = false; // true if the above holds, so we can divide
 
     size_t total_items = 0;
 
@@ -157,11 +159,15 @@ public:
         if (!is_view) {
             return pages[idx / PAGE_CAPACITY]->data[idx % PAGE_CAPACITY];
         } else {
-            // view backed by Plan::Page pointers
-            // find page by offsets (pages can have varying row counts)
-            auto it = std::upper_bound(view_page_offsets.begin(), view_page_offsets.end(), idx);
-            size_t page_idx = (it == view_page_offsets.begin()) ? 0 : (size_t)(it - view_page_offsets.begin() - 1);
-            size_t in_page_idx = idx - view_page_offsets[page_idx];
+            size_t page_idx, in_page_idx;
+            if (view_uniform) {
+                page_idx    = idx / view_rows_per_page;
+                in_page_idx = idx % view_rows_per_page;
+            } else {
+                auto it = std::upper_bound(view_page_offsets.begin(), view_page_offsets.end(), idx);
+                page_idx    = (it == view_page_offsets.begin()) ? 0 : (size_t)(it - view_page_offsets.begin() - 1);
+                in_page_idx = idx - view_page_offsets[page_idx];
+            }
             std::byte* raw = view_pages[page_idx];
             // num_rows stored at offset 0, num_non_null at offset 2
             uint16_t num_rows = *reinterpret_cast<uint16_t*>(raw);
@@ -197,6 +203,18 @@ public:
             uint16_t num_rows = *reinterpret_cast<uint16_t*>(raw);
             cumsum += num_rows;
         }
-        // (total_items_ should equal cumsum)
+        // All pages except the last should hold the same number of rows
+        // (assignment: non-null columns are densely packed). Verify instead of assuming.
+        view_uniform = false;
+        if (!view_pages.empty()) {
+            view_rows_per_page = *reinterpret_cast<uint16_t*>(view_pages[0]);
+            view_uniform = view_rows_per_page > 0;
+            for (size_t i = 0; i + 1 < view_pages.size(); ++i) {
+                if (*reinterpret_cast<uint16_t*>(view_pages[i]) != view_rows_per_page) {
+                    view_uniform = false;
+                    break;
+                }
+            }
+        }
     }
 };

@@ -1,5 +1,6 @@
 #ifdef __INTELLISENSE__
 #include "unchained_map.h"
+#include "threads.h"
 #endif
 
 
@@ -18,13 +19,14 @@ void UnchainedHashMap<Key, Value>::build(std::vector<column_t>& build_side_table
 
     size_t total_rows = build_side_table[key_column].size();
     num_elements = total_rows; 
+    if (total_rows > UINT32_MAX) throw std::runtime_error("build side too large for 32-bit row ids");
 
     calc_capacity();
     directory_mem.assign(capacity + 1, 0);
 
     directory = directory_mem.data() + 1;
 
-    size_t num_threads = std::thread::hardware_concurrency();
+    size_t num_threads = pool().size();
     size_t num_partitions = calc_partition_num(total_rows);
 
     
@@ -42,43 +44,15 @@ void UnchainedHashMap<Key, Value>::build(std::vector<column_t>& build_side_table
     std::vector<ThreadLocalState> thread_states;
     thread_states.reserve(num_threads);
 
-    std::vector<std::thread> threads;
-    size_t batch = total_rows / num_threads;
-    size_t remainder = total_rows % num_threads;
-    size_t current_start = 0;
+    // Phase 1: Tuple collection. Thread t collects rows [starts[t], starts[t+1]).
+    std::vector<size_t> starts(num_threads + 1);
+    for (size_t t = 0; t < num_threads; t++)
+        starts[t + 1] = starts[t] + total_rows / num_threads + (t < total_rows % num_threads ? 1 : 0);
 
-    for (size_t t=0; t < num_threads; t++)
-    {
-        thread_states.emplace_back(
-            num_partitions, 
-            partition_shift, 
-            build_side_table, 
-            // hashed_keys, 
-            key_column 
-        );
-    }
-    
-    
-    // Phase 1: Tuple collection.
-    for(size_t t=0; t < num_threads; t++){
-        size_t start = current_start;
-        size_t end = start + batch + (t < remainder ? 1 : 0);
-        current_start = end;
+    for (size_t t = 0; t < num_threads; t++)
+        thread_states.emplace_back(num_partitions, partition_shift, build_side_table, key_column);
 
-        threads.emplace_back(
-            &UnchainedHashMap::collect, 
-            this, 
-            start, 
-            end, 
-            std::ref(thread_states[t])
-        );
-    }
-
-    for(auto& t : threads) {
-        t.join();
-    }
-    threads.clear();
-
+    pool().run([&](size_t t) { collect(starts[t], starts[t + 1], thread_states[t]); });
 
     // Now, between the two phases (Figure 9 and Figure 10), we must count
     // how many tuples are in each partition. We do that by summing all "counts[i]" 
@@ -115,26 +89,8 @@ void UnchainedHashMap<Key, Value>::build(std::vector<column_t>& build_side_table
 
     next_partition_idx.store(0);
 
-    // NOw we are ready to move to Figure 10.
-    for (size_t t = 0; t < num_threads; ++t) {
-        
-        // size_t starting_partition = (t * num_partitions) / num_threads;
-        // size_t end_partition = ((t + 1) * num_partitions) / num_threads;
-
-        threads.emplace_back(
-                &UnchainedHashMap::count_and_copy,
-                this,
-                // starting_partition,
-                // end_partition,
-                std::cref(partition_offsets), 
-                std::cref(partition_queues)
-                // std::cref(hashed_keys)    
-        );
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
+    // Phase 2 (Figure 10): workers take partitions from the shared atomic counter.
+    pool().run([&](size_t) { count_and_copy(partition_offsets, partition_queues); });
 }
 
 template <class Key, class Value>
@@ -146,11 +102,11 @@ void UnchainedHashMap<Key, Value>::lookup(Key key, Func process_match) {
     
     auto seg_info = get_segment_info(slot);
 
-    if (!could_contain(seg_info.bloom, hashed_key)) return;
+    if (!could_contain_64(seg_info.bloom, hashed_key)) return;
 
     for (uint64_t i = seg_info.start; i < seg_info.end; i++) {
         if (data[i].key == key) {
-            process_match(data[i].index);
+            process_match(data[i].row);
         }
     }
 }
