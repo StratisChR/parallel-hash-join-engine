@@ -13,3 +13,9 @@ imdb.tgz
 imdb/
 build-prof/
 perf.data*
+perf*.data*
+run_*.txt
+baseline_*.txt
+*.zip
+spawn
+spawn.cpp
