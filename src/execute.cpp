@@ -241,9 +241,9 @@ struct JoinLogic{
                                 size_t count = work_end - work_start;
 
                                 for (size_t i = 0; i < count; ++i) {
-                                    if (i + 4 < count) { 
-                                        hash_table.prefetch_directory(data[offset + i + 4]);
-                                    }
+                                    // if (i + 4 < count) { 
+                                    //     hash_table.prefetch_directory(data[offset + i + 4]);
+                                    // }
                                     
                                     T key = static_cast<T>(data[offset + i]);
                                     
