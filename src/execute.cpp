@@ -8,6 +8,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <cassert>
+#include <algorithm>
 #include "unchained_map.h"
 #include "threads.h"
 
@@ -106,6 +108,22 @@ private:
     void finalize_str() { str_inserter->finalize(); }
 };
 
+
+// Copies `count` values from src (starting at row 0) into dst starting at row dst_start.
+// Each run ends at whichever page boundary comes first (source or destination),
+// so every run is a plain contiguous copy instead of one division per value.
+static void copy_column_range(column_t& dst, size_t dst_start, const column_t& src, size_t count) {
+    assert(!src.is_view && !dst.is_view);
+    size_t i = 0;
+    while (i < count) {
+        size_t s_page = i / PAGE_CAPACITY,               s_off = i % PAGE_CAPACITY;
+        size_t d_page = (dst_start + i) / PAGE_CAPACITY, d_off = (dst_start + i) % PAGE_CAPACITY;
+        size_t run = std::min({count - i, PAGE_CAPACITY - s_off, PAGE_CAPACITY - d_off});
+        std::copy_n(&src.pages[s_page]->data[s_off], run, &dst.pages[d_page]->data[d_off]);
+        i += run;
+    }
+}
+
 // Merges thread-local results into the final result columns.
 // Uses parallel copying if the dataset size exceeds PARALLEL_THRESHOLD.
 static void parallel_merge_columns(
@@ -146,33 +164,22 @@ static void parallel_merge_columns(
 
     const size_t PARALLEL_THRESHOLD = 8192; 
 
-    auto run_copy_task = [&](size_t t_start, size_t t_end) {
-        for (size_t t = t_start; t < t_end; ++t) {
-            for (size_t c = 0; c < num_output_cols; ++c) {
-                if (c >= thread_results[t].size()) continue;
-
-                const auto& src_col = thread_results[t][c];
-                size_t count = src_col.size();
-                if (count == 0) continue;
-
-                size_t global_start = offsets[c][t];
-                
-                // Fast Path Copy
-                for (size_t i = 0; i < count; ++i) {
-                    size_t dst_idx = global_start + i;
-                    size_t page_idx = dst_idx / PAGE_CAPACITY;
-                    size_t page_off = dst_idx % PAGE_CAPACITY;
-                    results[c].pages[page_idx]->data[page_off] = src_col[i];
-                }
-            }
+    auto run_copy_task = [&](size_t t) {
+        for (size_t c = 0; c < num_output_cols; ++c) {
+            if (c >= thread_results[t].size()) continue;
+            const auto& src_col = thread_results[t][c];
+            if (src_col.size() == 0) continue;
+            copy_column_range(results[c], offsets[c][t], src_col, src_col.size());
         }
     };
 
     if (total_rows_any < PARALLEL_THRESHOLD) {
-        run_copy_task(0, num_threads);
+        for (size_t t = 0; t < num_threads; ++t) run_copy_task(t);
     } else {
-        pool().run([&](size_t t) {
-            if (t < num_threads) run_copy_task(t, t + 1);
+        // Worker w handles thread results w, w + pool size, w + 2·pool size, ...
+        // so every result is copied even if there are more results than workers.
+        pool().run([&](size_t w) {
+            for (size_t t = w; t < num_threads; t += pool().size()) run_copy_task(t);
         });
     }
 }
