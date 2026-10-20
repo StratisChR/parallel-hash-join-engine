@@ -100,11 +100,14 @@ void UnchainedHashMap<Key, Value>::lookup(Key key, Func process_match) {
     // uint64_t hashed_key = fibonacci_hash(static_cast<uint64_t>(key));
     uint64_t slot = get_slot(hashed_key);
     
-    auto seg_info = get_segment_info(slot);
+    // Paper, Fig. 4: only the slot's own entry is needed to reject a probe.
+    // The previous entry (start of the range) is loaded only if the filter passes.
+    uint64_t entry = directory[slot];
+    if (!could_contain_64(static_cast<uint16_t>(entry & BLOOM_MASK), hashed_key)) return;
 
-    if (!could_contain_64(seg_info.bloom, hashed_key)) return;
-
-    for (uint64_t i = seg_info.start; i < seg_info.end; i++) {
+    uint64_t start = directory[slot - 1] >> 16;
+    uint64_t end   = entry >> 16;
+    for (uint64_t i = start; i < end; i++) {
         if (data[i].key == key) {
             process_match(data[i].row);
         }

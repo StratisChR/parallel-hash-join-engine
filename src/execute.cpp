@@ -318,19 +318,36 @@ struct JoinAlgorithm {
         size_t probe_idx = build_left ? right_col : left_col;
         size_t left_table_cols = left.size();
 
+                // Resolve once per join where each output column comes from.
+        struct OutSource { const column_t* col; bool from_left; };
+        std::vector<OutSource> sources;
+        sources.reserve(output_attrs.size());
+        for (auto& [src_col, _] : output_attrs)
+            sources.push_back(src_col < left_table_cols ? OutSource{&left[src_col], true}
+                                                        : OutSource{&right[src_col - left_table_cols], false});
+        const size_t num_cols = sources.size();
+
         auto thread_results = JoinLogic::run_probe<T, ExecuteResult>(
             hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
             [&](ExecuteResult& local, size_t l_idx, size_t r_idx) {
-                for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
-                    auto [src_col, _] = output_attrs[out_i];
-                    if (src_col < left_table_cols) {
-                        local[out_i].push_back(left[src_col][l_idx]);
-                    } else {
-                        local[out_i].push_back(right[src_col - left_table_cols][r_idx]);
-                    }
+                if (num_cols == 0) return;
+                // All output columns of a thread have the same length; only column 0
+                // keeps the count during the probe (fixed up for the others below).
+                size_t n   = local[0].total_items;
+                size_t off = n % PAGE_CAPACITY;
+                if (off == 0)
+                    for (size_t c = 0; c < num_cols; ++c) local[c].pages.push_back(acquire_page());
+                for (size_t c = 0; c < num_cols; ++c) {
+                    const OutSource& s = sources[c];
+                    local[c].pages.back()->data[off] = (*s.col)[s.from_left ? l_idx : r_idx];
                 }
+                local[0].total_items = n + 1;
             }
         );
+
+        // Give every output column the row count that column 0 tracked.
+        for (auto& local : thread_results)
+        for (size_t c = 1; c < num_cols; ++c) local[c].total_items = local[0].total_items;
 
         // Merge Phase
         results.resize(output_attrs.size());
