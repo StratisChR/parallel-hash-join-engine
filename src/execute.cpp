@@ -14,6 +14,34 @@
 #include "threads.h"
 
 namespace Contest {
+    
+#define PHASE_TIMERS   // comment this line out to switch all timing off
+
+#ifdef PHASE_TIMERS
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+
+struct PhaseTimers {
+    std::atomic<uint64_t> scan{0}, build{0}, probe{0}, merge{0},
+                          root_build{0}, root_probe{0}, root_finalize{0};
+    // Intermediate joins grouped by build-side rows: <1k, 1k-100k, >=100k.
+    std::atomic<uint64_t> joins_by_size[3]{}, us_by_size[3]{};
+};
+inline PhaseTimers g_timers;
+
+struct ScopedTimer {
+    std::atomic<uint64_t>& acc;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~ScopedTimer() {
+        acc += std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - start).count();
+    }
+};
+#define PHASE_TIMER(name) ScopedTimer phase_timer_##name{g_timers.name}
+#else
+#define PHASE_TIMER(name)
+#endif
 
 using ExecuteResult = std::vector<column_t>;
 
@@ -306,19 +334,22 @@ struct JoinAlgorithm {
 
     template <class T>
     auto run() {
+#ifdef PHASE_TIMERS                                                       // NEW
+        auto join_start = std::chrono::steady_clock::now();              // NEW
+#endif                                                                    // NEW
         UnchainedHashMap<T, size_t> hash_table;
 
         // Build Phase
         ExecuteResult& build_table = build_left ? left : right;
         size_t build_idx = build_left ? left_col : right_col;
-        hash_table.build(build_table, build_idx);
+        { PHASE_TIMER(build); hash_table.build(build_table, build_idx); }   // CHANGED: wrapped
 
         // Probe Phase
         ExecuteResult& probe_table = build_left ? right : left;
         size_t probe_idx = build_left ? right_col : left_col;
         size_t left_table_cols = left.size();
 
-                // Resolve once per join where each output column comes from.
+        // Resolve once per join where each output column comes from.
         struct OutSource { const column_t* col; bool from_left; };
         std::vector<OutSource> sources;
         sources.reserve(output_attrs.size());
@@ -327,31 +358,46 @@ struct JoinAlgorithm {
                                                         : OutSource{&right[src_col - left_table_cols], false});
         const size_t num_cols = sources.size();
 
-        auto thread_results = JoinLogic::run_probe<T, ExecuteResult>(
-            hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
-            [&](ExecuteResult& local, size_t l_idx, size_t r_idx) {
-                if (num_cols == 0) return;
-                // All output columns of a thread have the same length; only column 0
-                // keeps the count during the probe (fixed up for the others below).
-                size_t n   = local[0].total_items;
-                size_t off = n % PAGE_CAPACITY;
-                if (off == 0)
-                    for (size_t c = 0; c < num_cols; ++c) local[c].pages.push_back(acquire_page());
-                for (size_t c = 0; c < num_cols; ++c) {
-                    const OutSource& s = sources[c];
-                    local[c].pages.back()->data[off] = (*s.col)[s.from_left ? l_idx : r_idx];
+        std::vector<ExecuteResult> thread_results;                         // CHANGED: declared first
+        {                                                                  // NEW
+            PHASE_TIMER(probe);                                            // NEW
+            thread_results = JoinLogic::run_probe<T, ExecuteResult>(       // CHANGED: no "auto"
+                hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
+                [&](ExecuteResult& local, size_t l_idx, size_t r_idx) {
+                    if (num_cols == 0) return;
+                    // All output columns of a thread have the same length; only column 0
+                    // keeps the count during the probe (fixed up for the others below).
+                    size_t n   = local[0].total_items;
+                    size_t off = n % PAGE_CAPACITY;
+                    if (off == 0)
+                        for (size_t c = 0; c < num_cols; ++c) local[c].pages.push_back(acquire_page());
+                    for (size_t c = 0; c < num_cols; ++c) {
+                        const OutSource& s = sources[c];
+                        local[c].pages.back()->data[off] = (*s.col)[s.from_left ? l_idx : r_idx];
+                    }
+                    local[0].total_items = n + 1;
                 }
-                local[0].total_items = n + 1;
-            }
-        );
+            );
+        }                                                                  // NEW
 
         // Give every output column the row count that column 0 tracked.
         for (auto& local : thread_results)
-        for (size_t c = 1; c < num_cols; ++c) local[c].total_items = local[0].total_items;
+            for (size_t c = 1; c < num_cols; ++c) local[c].total_items = local[0].total_items;
 
         // Merge Phase
-        results.resize(output_attrs.size());
-        parallel_merge_columns(results, thread_results, output_attrs.size());
+        {                                                                  // NEW
+            PHASE_TIMER(merge);                                            // NEW
+            results.resize(output_attrs.size());
+            parallel_merge_columns(results, thread_results, output_attrs.size());
+        }                                                                  // NEW
+
+#ifdef PHASE_TIMERS                                                       // NEW
+        size_t b = build_table[build_idx].size();                         // NEW
+        int k = b < 1000 ? 0 : (b < 100000 ? 1 : 2);                       // NEW
+        g_timers.joins_by_size[k]++;                                      // NEW
+        g_timers.us_by_size[k] += std::chrono::duration_cast<std::chrono::microseconds>(   // NEW
+                                      std::chrono::steady_clock::now() - join_start).count();  // NEW
+#endif                                                                    // NEW
     }
 };
 
@@ -420,37 +466,39 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
 
         ExecuteResult& build_table = join.build_left ? left : right;
         size_t build_col_idx = join.build_left ? join.left_attr : join.right_attr;
-        
-        hash_table.build(build_table, build_col_idx);
+
+        { PHASE_TIMER(root_build); hash_table.build(build_table, build_col_idx); }   // CHANGED: wrapped
 
         ExecuteResult& probe_table = join.build_left ? right : left;
         size_t probe_idx = join.build_left ? join.right_attr : join.left_attr;
         size_t left_table_cols = left.size();
-        
-        auto thread_results = JoinLogic::run_probe<T, RootResultType>(
-            hash_table, probe_table, probe_idx, join.build_left, output_attrs.size(),
-            [&](RootResultType& writers, size_t l_idx, size_t r_idx) {
-                
-                if (writers.empty()) writers.resize(output_attrs.size());
-                if (!writers[0].col) {
-                    for(size_t i=0; i<output_attrs.size(); ++i) {
-                        writers[i].init(std::get<1>(output_attrs[i]));
+
+        std::vector<RootResultType> thread_results;                          // CHANGED: declared first
+        {                                                                    // NEW
+            PHASE_TIMER(root_probe);                                         // NEW
+            thread_results = JoinLogic::run_probe<T, RootResultType>(        // CHANGED: no "auto"
+                hash_table, probe_table, probe_idx, join.build_left, output_attrs.size(),
+                [&](RootResultType& writers, size_t l_idx, size_t r_idx) {
+                    if (writers.empty()) writers.resize(output_attrs.size());
+                    if (!writers[0].col) {
+                        for (size_t i = 0; i < output_attrs.size(); ++i) {
+                            writers[i].init(std::get<1>(output_attrs[i]));
+                        }
+                    }
+                    for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
+                        auto [src_col, dtype] = output_attrs[out_i];
+                        value_t val;
+                        if (src_col < left_table_cols) val = left[src_col][l_idx];
+                        else val = right[src_col - left_table_cols][r_idx];
+                        writers[out_i].add_val(val, plan);
                     }
                 }
-                
-                for (size_t out_i = 0; out_i < output_attrs.size(); ++out_i) {
-                    auto [src_col, dtype] = output_attrs[out_i];
+            );
+        }                                                                    // NEW
 
-                    value_t val;
-                    if (src_col < left_table_cols) val = left[src_col][l_idx];
-                    else val = right[src_col - left_table_cols][r_idx];
-
-                    writers[out_i].add_val(val, plan);
-                }
-            }
-        );
-
+        PHASE_TIMER(root_finalize);   // NEW: measures from here until the lambda returns
         ColumnarTable result_table;
+
         result_table.columns.reserve(output_attrs.size());
         
         for (size_t col_idx = 0; col_idx < output_attrs.size(); ++col_idx) {
@@ -496,10 +544,87 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     }
 }
 
+// Converts one input column (any column the zero-copy view can't handle) into value_t pages.
+// Pass 1 reads only page headers to find where each input page's rows go in the output;
+// pass 2 converts the pages in parallel, each into its own output positions.
+static void scan_copy_column(const Column& column, size_t table_id, size_t in_col_idx, column_t& target_col) {
+    const size_t n_src = column.pages.size();
+
+    // Pass 1 (serial, headers only): first output row of every input page.
+    std::vector<size_t> first_row(n_src + 1, 0);
+    for (size_t p = 0; p < n_src; ++p) {
+        uint16_t n = *reinterpret_cast<const uint16_t*>(column.pages[p]->data);
+        size_t rows = (n == 0xFFFF) ? 1 : (n == 0xFFFE) ? 0 : n;   // long-string start / continuation / normal
+        first_row[p + 1] = first_row[p] + rows;
+    }
+    const size_t total_rows = first_row[n_src];
+
+    target_col.total_items = total_rows;
+    size_t num_pages = (total_rows + PAGE_CAPACITY - 1) / PAGE_CAPACITY;
+    target_col.pages.reserve(num_pages);
+    for (size_t i = 0; i < num_pages; ++i) target_col.pages.push_back(acquire_page());
+
+    const auto tid = static_cast<uint8_t>(table_id);
+    const auto cid = static_cast<uint8_t>(in_col_idx);
+
+    // Pass 2: convert input page p into output rows [first_row[p], first_row[p+1]).
+    auto convert_page = [&](size_t p) {
+        const std::byte* page = column.pages[p]->data;
+        const uint16_t header = *reinterpret_cast<const uint16_t*>(page);
+        if (header == 0xFFFE) return;                               // long-string continuation: no row
+
+        size_t dst = first_row[p];
+        auto put = [&](value_t v) {
+            target_col.pages[dst / PAGE_CAPACITY]->data[dst % PAGE_CAPACITY] = v;
+            ++dst;
+        };
+
+        if (header == 0xFFFF) {                                     // long-string start: one row
+            auto num_chars = *reinterpret_cast<const uint16_t*>(page + 2);
+            put(value_t(StringRef{tid, cid, static_cast<uint16_t>(p), static_cast<uint32_t>(num_chars), true}));
+            return;
+        }
+
+        const uint16_t rows   = header;
+        const auto*    bitmap = reinterpret_cast<const uint8_t*>(page + PAGE_SIZE - (rows + 7) / 8);
+        if (column.type == DataType::INT32) {
+            const auto* int_data = reinterpret_cast<const int32_t*>(page + 4);
+            uint16_t data_idx = 0;
+            for (uint16_t i = 0; i < rows; ++i)
+                put((bitmap[i / 8] & (1u << (i % 8))) ? value_t(int_data[data_idx++]) : value_t());
+        } else {                                                    // VARCHAR
+            const auto* str_offsets = reinterpret_cast<const uint16_t*>(page + 4);
+            uint16_t data_idx = 0;
+            uint32_t prev_end = 0;
+            for (uint16_t i = 0; i < rows; ++i) {
+                if (bitmap[i / 8] & (1u << (i % 8))) {
+                    uint32_t end_off = str_offsets[data_idx++];
+                    uint32_t packed  = (prev_end << 16) | ((end_off - prev_end) & 0xFFFF);
+                    prev_end = end_off;
+                    put(value_t(StringRef{tid, cid, static_cast<uint16_t>(p), packed, false}));
+                } else {
+                    put(value_t());
+                }
+            }
+        }
+    };
+
+    // Small columns: not worth waking the pool.
+    constexpr size_t PARALLEL_MIN_PAGES = 16;
+    if (n_src < PARALLEL_MIN_PAGES) {
+        for (size_t p = 0; p < n_src; ++p) convert_page(p);
+    } else {
+        std::atomic<size_t> next{0};
+        pool().run([&](size_t) {
+            for (size_t p; (p = next.fetch_add(1, std::memory_order_relaxed)) < n_src;) convert_page(p);
+        });
+    }
+}
 
 ExecuteResult execute_scan(const Plan& plan,
     const ScanNode& scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    PHASE_TIMER(scan);
 
     auto table_id = scan.base_table_id;
     auto& input   = plan.inputs[table_id];
@@ -537,99 +662,7 @@ ExecuteResult execute_scan(const Plan& plan,
         }
 
         // Standard Copy Path
-        size_t total_rows = 0;
-        for (auto* p : column.pages) {
-            uint16_t n = *reinterpret_cast<uint16_t*>(p->data);
-            if (n == 0xFFFF) total_rows += 1;      // Long string start
-            else if (n == 0xFFFE) total_rows += 0; // Continuation
-            else total_rows += n;                  // Standard
-        }
-
-        target_col.total_items = total_rows;
-        size_t num_pages = (total_rows + PAGE_CAPACITY - 1) / PAGE_CAPACITY;
-        target_col.pages.reserve(num_pages);
-        for(size_t i=0; i<num_pages; ++i) {
-            target_col.pages.push_back(acquire_page());
-        }
-
-        size_t current_row = 0;
-        size_t page_idx = 0; 
-        ColPage* curr_target_page = num_pages > 0 ? target_col.pages[0].get() : nullptr;
-
-        for (size_t src_p_idx = 0; src_p_idx < column.pages.size(); ++src_p_idx) {
-            auto* page = column.pages[src_p_idx]->data;
-            uint16_t val_at_0 = *reinterpret_cast<uint16_t*>(page);
-            
-            uint16_t num_logical_rows = val_at_0;
-            bool is_long_start = false;
-
-            if (val_at_0 == 0xFFFF) {
-                num_logical_rows = 1;
-                is_long_start = true;
-            } else if (val_at_0 == 0xFFFE) {
-                continue; 
-            }
-
-            auto* int_data = reinterpret_cast<int32_t*>(page + 4);
-            auto* str_offsets = reinterpret_cast<uint16_t*>(page + 4);
-            auto* bitmap = reinterpret_cast<uint8_t*>(page + PAGE_SIZE - (num_logical_rows + 7) / 8);
-
-            size_t in_page_idx = current_row % PAGE_CAPACITY;
-
-            if (column.type == DataType::INT32) {
-                uint16_t data_idx = 0;
-                for (uint16_t i = 0; i < num_logical_rows; ++i) {
-                    value_t v;
-                    if (bitmap[i/8] & (1u << (i%8))) v = value_t(int_data[data_idx++]);
-                    else v = value_t();
-
-                    curr_target_page->data[in_page_idx++] = v;
-                    
-                    if (in_page_idx == PAGE_CAPACITY) {
-                        if (++page_idx < num_pages) curr_target_page = target_col.pages[page_idx].get();
-                        in_page_idx = 0;
-                    }
-                }
-            } else if (column.type == DataType::VARCHAR) {
-                if (is_long_start) {
-                     auto num_chars = *reinterpret_cast<uint16_t*>(page + 2);
-
-                     StringRef s{static_cast<uint8_t>(table_id), static_cast<uint8_t>(in_col_idx), 
-                                static_cast<uint16_t>(src_p_idx), static_cast<uint32_t>(num_chars), true};
-
-                     curr_target_page->data[in_page_idx++] = value_t(s);
-
-                     if (in_page_idx == PAGE_CAPACITY) {
-                        if (++page_idx < num_pages) curr_target_page = target_col.pages[page_idx].get();
-                        in_page_idx = 0;
-                     }
-                } else {
-                    uint16_t data_idx = 0;
-                    uint32_t prev_end = 0;
-                    for (uint16_t i = 0; i < num_logical_rows; ++i) {
-                        value_t v;
-                        if (bitmap[i/8] & (1u << (i%8))) {
-                            auto end_off = str_offsets[data_idx++];
-                            uint32_t len = static_cast<uint32_t>(end_off) - prev_end;
-                            uint32_t packed = (prev_end << 16) | (len & 0xFFFF);
-                            prev_end = end_off;
-                            StringRef s{static_cast<uint8_t>(table_id), static_cast<uint8_t>(in_col_idx), 
-                                        static_cast<uint16_t>(src_p_idx), packed, false};
-                            v = value_t(s);
-                        } else {
-                            v = value_t();
-                        }
-
-                        curr_target_page->data[in_page_idx++] = v;
-                        if (in_page_idx == PAGE_CAPACITY) {
-                            if (++page_idx < num_pages) curr_target_page = target_col.pages[page_idx].get();
-                            in_page_idx = 0;
-                        }
-                    }
-                }
-            }
-            current_row += num_logical_rows;
-        }
+        scan_copy_column(column, table_id, in_col_idx, target_col);
     }
     return results;
 }
@@ -658,6 +691,20 @@ void* build_context() {
     pool();          // start the worker threads once, before any query runs
     return nullptr;
 }
-void destroy_context([[maybe_unused]] void* context) {}
+
+void destroy_context([[maybe_unused]] void* context) {
+#ifdef PHASE_TIMERS
+    auto ms = [](auto& a) { return a.load() / 1000.0; };
+    fprintf(stderr,
+        "scan %.0f | build %.0f | probe %.0f | merge %.0f | root build %.0f | "
+        "root probe+output %.0f | root finalize %.0f  (ms)\n",
+        ms(g_timers.scan), ms(g_timers.build), ms(g_timers.probe), ms(g_timers.merge),
+        ms(g_timers.root_build), ms(g_timers.root_probe), ms(g_timers.root_finalize));
+    const char* label[3] = {"<1k", "1k-100k", ">=100k"};
+    for (int k = 0; k < 3; ++k)
+        fprintf(stderr, "joins with build side %-7s: %4lu joins, %6.0f ms\n", label[k],
+                (unsigned long)g_timers.joins_by_size[k].load(), ms(g_timers.us_by_size[k]));
+#endif
+}
 
 } // namespace Contest
