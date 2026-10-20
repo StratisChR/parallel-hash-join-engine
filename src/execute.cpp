@@ -383,6 +383,10 @@ ExecuteResult execute_hash_join(const Plan& plan,
     auto left  = execute_impl(plan, left_idx);
     auto right = execute_impl(plan, right_idx);
 
+    // Build on the smaller input. The plan's build side comes from PostgreSQL's size
+    // *estimates*; here we know the actual sizes. A join's result is the same either way.
+    bool build_left = left[join.left_attr].size() <= right[join.right_attr].size();
+
     ExecuteResult results;
     results.reserve(output_attrs.size());
     for(size_t i = 0; i < output_attrs.size(); ++i) {
@@ -390,7 +394,7 @@ ExecuteResult execute_hash_join(const Plan& plan,
     }
 
     JoinAlgorithm join_algorithm{
-        .build_left    = join.build_left,
+        .build_left    = build_left,
         .left          = left,
         .right         = right,
         .results       = results,
@@ -400,7 +404,7 @@ ExecuteResult execute_hash_join(const Plan& plan,
         .plan_ptr      = &plan
     };
 
-    if (join.build_left) {
+    if (build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
             case DataType::INT32:   join_algorithm.run<int32_t>(); break;
             default: throw std::runtime_error("unsupported join key type");
@@ -421,6 +425,9 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     
     auto left  = execute_impl(plan, join.left);
     auto right = execute_impl(plan, join.right);
+
+    bool build_left = left[join.left_attr].size() <= right[join.right_attr].size();
+
     auto& left_types  = plan.nodes[join.left].output_attrs;
     auto& right_types = plan.nodes[join.right].output_attrs;
 
@@ -431,20 +438,20 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
 
         UnchainedHashMap<T, size_t> hash_table;
 
-        ExecuteResult& build_table = join.build_left ? left : right;
-        size_t build_col_idx = join.build_left ? join.left_attr : join.right_attr;
+        ExecuteResult& build_table = build_left ? left : right;
+        size_t build_col_idx = build_left ? join.left_attr : join.right_attr;
 
         { PHASE_TIMER(root_build); hash_table.build(build_table, build_col_idx); }   // CHANGED: wrapped
 
-        ExecuteResult& probe_table = join.build_left ? right : left;
-        size_t probe_idx = join.build_left ? join.right_attr : join.left_attr;
+        ExecuteResult& probe_table = build_left ? right : left;
+        size_t probe_idx = build_left ? join.right_attr : join.left_attr;
         size_t left_table_cols = left.size();
 
         std::vector<RootResultType> thread_results;                          // CHANGED: declared first
         {                                                                    // NEW
             PHASE_TIMER(root_probe);                                         // NEW
             thread_results = JoinLogic::run_probe<T, RootResultType>(        // CHANGED: no "auto"
-                hash_table, probe_table, probe_idx, join.build_left, output_attrs.size(),
+                hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
                 [&](RootResultType& writers, size_t l_idx, size_t r_idx) {
                     if (writers.empty()) writers.resize(output_attrs.size());
                     if (!writers[0].col) {
@@ -501,7 +508,7 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     };
     
     struct IntTag { using type = int32_t; };
-    DataType key_type = join.build_left ? std::get<1>(left_types[join.left_attr]) 
+    DataType key_type = build_left ? std::get<1>(left_types[join.left_attr]) 
                                         : std::get<1>(right_types[join.right_attr]);
 
     if (key_type == DataType::INT32) {
