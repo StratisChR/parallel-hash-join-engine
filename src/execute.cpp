@@ -47,40 +47,33 @@ using ExecuteResult = std::vector<column_t>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
-// Helper: Materializes a StringRef into a standard std::string.
-// Handles potentially segmented (long) strings across pages.
-static std::string materialize_string_from_value(const Plan& plan, const value_t& vv) {
-    auto sref = vv.get_stringref();
-    if (sref.is_null()) return std::string();
-    
-    auto table_id = sref.table_id();
-    auto col_id = sref.column_id();
-    auto page_id = sref.page_id();
-    auto off = sref.offset();
-    const auto& column = plan.inputs[table_id].columns[col_id];
-    
+// Returns the characters of a non-null string value without allocating.
+// Short strings: a view straight into the input page.
+// Long strings span several pages, so they are assembled into `scratch` and the
+// view points there (valid until the next call with the same scratch).
+static std::string_view string_view_from_value(const Plan& plan, const value_t& vv, std::string& scratch) {
+    StringRef sref = vv.get_stringref();
+    const auto& column = plan.inputs[sref.table_id()].columns[sref.column_id()];
+    size_t page_id = sref.page_id();
+
     if (sref.is_long()) {
-        std::string out;
+        scratch.clear();
         size_t idx = page_id;
         do {
             auto* page = column.pages[idx]->data;
-            auto n = *reinterpret_cast<uint16_t*>(page + 2);
-            out.append(reinterpret_cast<char*>(page + 4), n);
+            auto  n    = *reinterpret_cast<const uint16_t*>(page + 2);
+            scratch.append(reinterpret_cast<const char*>(page + 4), n);
             ++idx;
         } while (idx < column.pages.size() &&
-                *reinterpret_cast<uint16_t*>(column.pages[idx]->data) == 0xfffe);
-        return out;
-    } else {
-        // Short string optimization: Contained within a single page
-        auto* page = column.pages[page_id]->data;
-        auto num_non_null = *reinterpret_cast<uint16_t*>(page + 2);
-        // Skip header and bitmask
-        auto* data_begin = reinterpret_cast<char*>(page + 4 + num_non_null * 2);
-        
-        uint32_t start = static_cast<uint32_t>(off >> 16);
-        uint32_t len = static_cast<uint32_t>(off & 0xFFFF);
-        return std::string(data_begin + start, data_begin + start + len);
+                 *reinterpret_cast<const uint16_t*>(column.pages[idx]->data) == 0xfffe);
+        return scratch;
     }
+
+    auto* page         = column.pages[page_id]->data;
+    auto  num_non_null = *reinterpret_cast<const uint16_t*>(page + 2);
+    auto* data_begin   = reinterpret_cast<const char*>(page + 4 + num_non_null * 2);
+    uint32_t off       = sref.offset();
+    return std::string_view(data_begin + (off >> 16), off & 0xFFFF);
 }
 
 // Wrapper for writing to columnar tables during Root Join materialization
@@ -89,6 +82,7 @@ struct ColumnWriter {
     std::unique_ptr<ColumnInserter<int32_t>> int_inserter;
     std::unique_ptr<ColumnInserter<std::string>> str_inserter;
     DataType type;
+    std::string scratch;   // reused buffer for long strings (one per writer, so one per thread)
 
     void (ColumnWriter::*add_val_impl)(const value_t&, const Plan&) = nullptr;
     void (ColumnWriter::*finalize_impl)() = nullptr;
@@ -129,7 +123,7 @@ private:
     
     void add_val_str(const value_t& v, const Plan& plan) {
         if (v.is_null()) str_inserter->insert_null();
-        else str_inserter->insert(materialize_string_from_value(plan, v));
+        else str_inserter->insert(string_view_from_value(plan, v, scratch));
     }
     
     void finalize_int() { int_inserter->finalize(); }
@@ -304,10 +298,7 @@ struct JoinAlgorithm {
     const std::vector<std::tuple<size_t, DataType>>&  output_attrs;
     const Plan* plan_ptr;
 
-    std::string materialize_string(const value_t& vv) const {
-        return materialize_string_from_value(*plan_ptr, vv);
-    }
-
+    
     template <class T>
     auto run() {
 #ifdef PHASE_TIMERS                                                       // NEW
