@@ -203,7 +203,10 @@ struct JoinLogic{
         size_t total_rows = probe_col.total_items;
 
         std::atomic<size_t> next_batch_idx{0};
-        const size_t BATCH_SIZE = 65536;
+        // Rows each thread takes at a time: big enough that taking work is cheap, small
+        // enough that every thread gets work (65536 left most threads idle on probe sides
+        // below ~786k rows). About 8 pieces per thread, between 2048 and 65536 rows.
+        const size_t BATCH_SIZE = std::clamp<size_t>(total_rows / (num_threads * 8), 2048, 65536);
         constexpr size_t PB = UnchainedHashMap<T, size_t>::PROBE_BATCH;
 
         pool().run([&](size_t t) {
