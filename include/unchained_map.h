@@ -58,6 +58,13 @@ public:
 
     template <typename Func>
     void lookup(Key key, Func process_match);
+    
+    // Probes a batch of up to PROBE_BATCH keys. Calls on_match(i, build_row) for every
+    // build row whose key equals keys[i]. Same results as calling lookup() per key,
+    // but organized in three tight loops so the CPU can overlap many memory accesses.
+    static constexpr size_t PROBE_BATCH = 256;
+    template <typename Func>
+    void lookup_batch(const int32_t* keys, size_t n, Func on_match) const;
     // The following is not currently used, I was working on something which
     // might be a good idea.
     void prefetch_directory(Key key) const;

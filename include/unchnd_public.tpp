@@ -123,3 +123,38 @@ void UnchainedHashMap<Key, Value>::prefetch_directory(Key key) const {
     
     __builtin_prefetch(&directory[slot], 0, 3);
 }
+
+template <class Key, class Value>
+template <typename Func>
+void UnchainedHashMap<Key, Value>::lookup_batch(const int32_t* keys, size_t n, Func on_match) const {
+    assert(n <= PROBE_BATCH);
+    uint64_t hashes[PROBE_BATCH];
+    uint64_t entries[PROBE_BATCH];
+    uint16_t survivors[PROBE_BATCH];
+
+    // Loop 1: hash every key. No memory access besides the keys themselves.
+    for (size_t i = 0; i < n; ++i)
+        hashes[i] = hash32(static_cast<uint32_t>(keys[i]), 0);
+
+    // Loop 2: load each key's directory entry and check its Bloom filter.
+    // The loads are independent of each other, so the CPU can have many in flight.
+    // Survivors are collected without a branch: the index is always written, and
+    // the count only advances if the filter passed.
+    size_t num_survivors = 0;
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t entry = directory[get_slot(hashes[i])];
+        entries[i] = entry;
+        survivors[num_survivors] = static_cast<uint16_t>(i);
+        num_survivors += could_contain_64(static_cast<uint16_t>(entry & BLOOM_MASK), hashes[i]);
+    }
+
+    // Loop 3: only the survivors (typically a small fraction) scan their range.
+    for (size_t j = 0; j < num_survivors; ++j) {
+        size_t   i     = survivors[j];
+        uint64_t slot  = get_slot(hashes[i]);
+        uint64_t start = directory[slot - 1] >> 16;
+        uint64_t end   = entries[i] >> 16;
+        for (uint64_t k = start; k < end; ++k)
+            if (data[k].key == keys[i]) on_match(i, data[k].row);
+    }
+}

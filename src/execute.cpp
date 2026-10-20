@@ -193,98 +193,83 @@ struct JoinLogic{
         bool build_left,
         size_t num_output_cols,
         MaterializeFn&& materialize_fn
-    ) 
+    )
     {
-        // 3a. thread count:
         size_t num_threads = pool().size();
         std::vector<ResultContainer> thread_results(num_threads);
-        for (auto& r : thread_results) r.resize(num_output_cols);   // was inside the spawn loop
+        for (auto& r : thread_results) r.resize(num_output_cols);
 
         auto& probe_col = probe_table[probe_col_idx];
-        size_t total_rows = probe_col.total_items; 
+        size_t total_rows = probe_col.total_items;
 
         std::atomic<size_t> next_batch_idx{0};
-        const size_t BATCH_SIZE = 65536; 
+        const size_t BATCH_SIZE = 65536;
+        constexpr size_t PB = UnchainedHashMap<T, size_t>::PROBE_BATCH;
 
-        pool().run([&](size_t t) 
-            {
-                auto& local_res = thread_results[t];
+        pool().run([&](size_t t) {
+            auto& local_res = thread_results[t];
 
-                while (true) {
-                    size_t start = next_batch_idx.fetch_add(BATCH_SIZE, std::memory_order_relaxed);
-                    if (start >= total_rows) break;
-                    size_t end = std::min(start + BATCH_SIZE, total_rows);
+            // Reports one match: probe row `probe_row` matched build row `build_row`.
+            auto emit = [&](size_t probe_row, size_t build_row) {
+                materialize_fn(local_res, build_left ? build_row : probe_row,
+                                          build_left ? probe_row : build_row);
+            };
 
-                    // Optimization: If using view pages, we can prefetch and process blocks
-                    if (probe_col.is_view) {
-                        auto it = std::upper_bound(probe_col.view_page_offsets.begin(), 
-                                                   probe_col.view_page_offsets.end(), start);
-                        size_t page_idx = (it == probe_col.view_page_offsets.begin()) 
-                                          ? 0 : std::distance(probe_col.view_page_offsets.begin(), it) - 1;
+            int32_t  keys[PB];      // used by the materialized path only
+            uint32_t rows[PB];
 
-                        while (page_idx < probe_col.view_pages.size()) {
-                            size_t page_start = probe_col.view_page_offsets[page_idx];
-                            if (page_start >= end) break;
+            while (true) {
+                size_t start = next_batch_idx.fetch_add(BATCH_SIZE, std::memory_order_relaxed);
+                if (start >= total_rows) break;
+                size_t end = std::min(start + BATCH_SIZE, total_rows);
 
-                            std::byte* raw_page = probe_col.view_pages[page_idx];
-                            uint16_t num_rows = *reinterpret_cast<uint16_t*>(raw_page);
-                            size_t page_end = page_start + num_rows;
-
-                            size_t work_start = std::max(start, page_start);
-                            size_t work_end = std::min(end, page_end);
-
-                            if (work_start < work_end) {
-                                const int32_t* data = reinterpret_cast<const int32_t*>(raw_page + 4);
-                                size_t offset = work_start - page_start;
-                                size_t count = work_end - work_start;
-
-                                for (size_t i = 0; i < count; ++i) {
-                                    // if (i + 4 < count) { 
-                                    //     hash_table.prefetch_directory(data[offset + i + 4]);
-                                    // }
-                                    
-                                    T key = static_cast<T>(data[offset + i]);
-                                    
-                                    hash_table.lookup(key, [&](size_t build_idx) {
-                                        size_t cur_idx = work_start + i;
-                                        materialize_fn(local_res, build_left ? build_idx : cur_idx, 
-                                                                  build_left ? cur_idx : build_idx);
-                                    });
-                                }
-                            }
-                            page_idx++;
+                if (probe_col.is_view) {
+                    // Zero-copy input: keys are already a contiguous int32 array, no nulls.
+                    auto it = std::upper_bound(probe_col.view_page_offsets.begin(),
+                                               probe_col.view_page_offsets.end(), start);
+                    size_t page_idx = (it == probe_col.view_page_offsets.begin())
+                                      ? 0 : std::distance(probe_col.view_page_offsets.begin(), it) - 1;
+                    while (page_idx < probe_col.view_pages.size()) {
+                        size_t page_start = probe_col.view_page_offsets[page_idx];
+                        if (page_start >= end) break;
+                        std::byte* raw_page = probe_col.view_pages[page_idx];
+                        uint16_t num_rows = *reinterpret_cast<uint16_t*>(raw_page);
+                        size_t work_start = std::max(start, page_start);
+                        size_t work_end   = std::min(end, page_start + num_rows);
+                        const int32_t* data = reinterpret_cast<const int32_t*>(raw_page + 4)
+                                              + (work_start - page_start);
+                        for (size_t b = work_start; b < work_end; b += PB) {
+                            size_t n = std::min(PB, work_end - b);
+                            hash_table.lookup_batch(data + (b - work_start), n,
+                                [&](size_t i, size_t build_row) { emit(b + i, build_row); });
                         }
-                    } 
-                    else {
-                        // Standard page iteration
-                        constexpr size_t PAGE_CAPACITY = 4096;
-                        size_t cur = start;
-                        while(cur < end) {
-                            size_t page_idx = cur / PAGE_CAPACITY;
-                            size_t offset = cur % PAGE_CAPACITY;
-                            
-                            if (page_idx >= probe_col.pages.size()) break;
-                            
-                            const auto* page = probe_col.pages[page_idx].get();
-                            size_t count = std::min(end - cur, PAGE_CAPACITY - offset);
-
-                            for(size_t i=0; i<count; ++i) {
-                                value_t cell = page->data[offset + i];
-                                if (!cell.is_null()) {
-                                    T key = static_cast<T>(cell.get_int());
-                                    
-                                    hash_table.lookup(key, [&](size_t build_idx) {
-                                        size_t cur_idx = cur + i;
-                                        materialize_fn(local_res, build_left ? build_idx : cur_idx, 
-                                                                  build_left ? cur_idx : build_idx);
-                                    });
-                                }
-                            }
-                            cur += count;
-                        }
+                        page_idx++;
                     }
+                } else {
+                    // Materialized input: collect non-null keys (and their row numbers) into a batch.
+                    size_t n = 0;
+                    auto flush = [&] {
+                        hash_table.lookup_batch(keys, n,
+                            [&](size_t i, size_t build_row) { emit(rows[i], build_row); });
+                        n = 0;
+                    };
+                    for (size_t cur = start; cur < end;) {
+                        size_t page_idx = cur / PAGE_CAPACITY, offset = cur % PAGE_CAPACITY;
+                        if (page_idx >= probe_col.pages.size()) break;
+                        const value_t* cells = probe_col.pages[page_idx]->data + offset;
+                        size_t count = std::min(end - cur, PAGE_CAPACITY - offset);
+                        for (size_t i = 0; i < count; ++i) {
+                            if (cells[i].is_null()) continue;
+                            keys[n] = cells[i].get_int();
+                            rows[n] = static_cast<uint32_t>(cur + i);
+                            if (++n == PB) flush();
+                        }
+                        cur += count;
+                    }
+                    if (n) flush();
                 }
-            });
+            }
+        });
         return thread_results;
     }
 };
