@@ -136,79 +136,55 @@ private:
     void finalize_str() { str_inserter->finalize(); }
 };
 
-
-// Copies `count` values from src (starting at row 0) into dst starting at row dst_start.
-// Each run ends at whichever page boundary comes first (source or destination),
-// so every run is a plain contiguous copy instead of one division per value.
-static void copy_column_range(column_t& dst, size_t dst_start, const column_t& src, size_t count) {
-    assert(!src.is_view && !dst.is_view);
-    size_t i = 0;
-    while (i < count) {
-        size_t s_page = i / PAGE_CAPACITY,               s_off = i % PAGE_CAPACITY;
-        size_t d_page = (dst_start + i) / PAGE_CAPACITY, d_off = (dst_start + i) % PAGE_CAPACITY;
-        size_t run = std::min({count - i, PAGE_CAPACITY - s_off, PAGE_CAPACITY - d_off});
-        std::copy_n(&src.pages[s_page]->data[s_off], run, &dst.pages[d_page]->data[d_off]);
-        i += run;
-    }
-}
-
-// Merges thread-local results into the final result columns.
-// Uses parallel copying if the dataset size exceeds PARALLEL_THRESHOLD.
-static void parallel_merge_columns(
-    std::vector<column_t>& results,
-    const std::vector<ExecuteResult>& thread_results,
-    size_t num_output_cols) 
-{
-    size_t num_threads = thread_results.size();
-    
-    // offsets[col][thread_id] = global_start_index
-    std::vector<std::vector<size_t>> offsets(num_output_cols, std::vector<size_t>(num_threads + 1, 0));
-    size_t total_rows_any = 0;
-
+// Combines the per-thread results of a join into one result. Row order inside an
+// intermediate result does not matter (a join's output is the same for any input
+// order), so instead of copying every row, the full pages of every thread are moved
+// over (just pointers), and only each thread's partially filled last page is copied.
+// All columns of one thread have the same length, so every output column gets the
+// same row arrangement.
+static void merge_thread_results(std::vector<column_t>& results,
+                                 std::vector<ExecuteResult>& thread_results,
+                                 size_t num_output_cols) {
+    const size_t num_threads = thread_results.size();
     for (size_t c = 0; c < num_output_cols; ++c) {
-        size_t accum = 0;
+        column_t& dst = results[c];
+        size_t total = 0, tail_total = 0;
+        for (auto& tr : thread_results) {
+            if (c >= tr.size()) continue;
+            total      += tr[c].size();
+            tail_total += tr[c].size() % PAGE_CAPACITY;
+        }
+        dst.total_items = total;
+        dst.pages.reserve((total + PAGE_CAPACITY - 1) / PAGE_CAPACITY);
+
+        // 1. Move every full page (no copying).
         for (size_t t = 0; t < num_threads; ++t) {
-            offsets[c][t] = accum;
-            if (c < thread_results[t].size()) {
-                accum += thread_results[t][c].size();
+            if (c >= thread_results[t].size()) continue;
+            column_t& src = thread_results[t][c];
+            assert(!src.is_view);
+            size_t full = src.size() / PAGE_CAPACITY;
+            for (size_t p = 0; p < full; ++p) dst.pages.push_back(std::move(src.pages[p]));
+        }
+
+        // 2. Copy the partial last pages, packed one after another.
+        size_t tail_pages = (tail_total + PAGE_CAPACITY - 1) / PAGE_CAPACITY;
+        size_t first_tail_page = dst.pages.size();
+        for (size_t p = 0; p < tail_pages; ++p) dst.pages.push_back(acquire_page());
+        size_t pos = 0;   // position within the tail area
+        for (size_t t = 0; t < num_threads; ++t) {
+            if (c >= thread_results[t].size()) continue;
+            column_t& src = thread_results[t][c];
+            size_t tail = src.size() % PAGE_CAPACITY;
+            if (tail == 0) continue;
+            const value_t* from = src.pages[src.size() / PAGE_CAPACITY]->data;
+            size_t done = 0;
+            while (done < tail) {
+                size_t d_page = first_tail_page + pos / PAGE_CAPACITY, d_off = pos % PAGE_CAPACITY;
+                size_t run = std::min(tail - done, PAGE_CAPACITY - d_off);
+                std::copy_n(from + done, run, &dst.pages[d_page]->data[d_off]);
+                done += run; pos += run;
             }
         }
-        offsets[c][num_threads] = accum;
-        if (c == 0) total_rows_any = accum;
-    }
-
-    // Pre-allocate Pages serially to avoid allocation contention
-    for (size_t c = 0; c < num_output_cols; ++c) {
-        size_t total_items = offsets[c][num_threads];
-        results[c].total_items = total_items;
-        size_t num_pages = (total_items + PAGE_CAPACITY - 1) / PAGE_CAPACITY;
-        if (total_items == 0) num_pages = 0;
-        
-        results[c].pages.reserve(num_pages);
-        for(size_t p=0; p<num_pages; ++p) {
-            results[c].pages.push_back(acquire_page());
-        }
-    }
-
-    const size_t PARALLEL_THRESHOLD = 8192; 
-
-    auto run_copy_task = [&](size_t t) {
-        for (size_t c = 0; c < num_output_cols; ++c) {
-            if (c >= thread_results[t].size()) continue;
-            const auto& src_col = thread_results[t][c];
-            if (src_col.size() == 0) continue;
-            copy_column_range(results[c], offsets[c][t], src_col, src_col.size());
-        }
-    };
-
-    if (total_rows_any < PARALLEL_THRESHOLD) {
-        for (size_t t = 0; t < num_threads; ++t) run_copy_task(t);
-    } else {
-        // Worker w handles thread results w, w + pool size, w + 2·pool size, ...
-        // so every result is copied even if there are more results than workers.
-        pool().run([&](size_t w) {
-            for (size_t t = w; t < num_threads; t += pool().size()) run_copy_task(t);
-        });
     }
 }
 
@@ -388,7 +364,7 @@ struct JoinAlgorithm {
         {                                                                  // NEW
             PHASE_TIMER(merge);                                            // NEW
             results.resize(output_attrs.size());
-            parallel_merge_columns(results, thread_results, output_attrs.size());
+            merge_thread_results(results, thread_results, output_attrs.size());
         }                                                                  // NEW
 
 #ifdef PHASE_TIMERS                                                       // NEW
