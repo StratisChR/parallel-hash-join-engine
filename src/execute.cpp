@@ -16,7 +16,7 @@
 
 namespace Contest {
     
-#define PHASE_TIMERS   // comment this line out to switch all timing off
+// #define PHASE_TIMERS   // comment this line out to switch all timing off
 
 #ifdef PHASE_TIMERS
 #include <atomic>
