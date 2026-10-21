@@ -736,7 +736,6 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 }
 
 void* build_context() {
-    pool();          // start the worker threads once, before any query runs
     return nullptr;
 }
 
