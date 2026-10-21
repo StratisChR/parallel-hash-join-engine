@@ -135,4 +135,13 @@ target_include_directories(test_indexing PRIVATE include)
 target_include_directories(ex2_task3_hashes_tests PRIVATE include)
 target_include_directories(regression_tests PRIVATE include)
 
-
+# Sanitizer build for CI: instruments our own code and tests only. Third-party
+# libraries (abseil, re2, ...) stay uninstrumented; GCC's UBSan breaks abseil's
+# constexpr code.
+option(SANITIZE "Build unit_tests and regression_tests with ASan + UBSan" OFF)
+if(SANITIZE)
+    foreach(target unit_tests regression_tests)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
