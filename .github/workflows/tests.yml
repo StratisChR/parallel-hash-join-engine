@@ -57,15 +57,18 @@ jobs:
           path: build-san/_deps
           key: deps-san-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
 
-      - name: Configure with sanitizers
+      - name: Configure with sanitizers (our code and tests only)
         run: >
-          cmake -S . -B build-san -DCMAKE_BUILD_TYPE=RelWithDebInfo -Wno-dev
-          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake -S . -B build-san -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSANITIZE=ON -Wno-dev
 
       - name: Build tests
         run: cmake --build build-san -j"$(nproc)" --target unit_tests regression_tests
 
+      # Ubuntu 24.04 runners randomize addresses more than older sanitizer runtimes
+      # support, which can crash sanitized programs at startup. Lower it for this job.
+      - name: Allow AddressSanitizer to start
+        run: sudo sysctl vm.mmap_rnd_bits=28
+        
       # Any memory error, leak, or undefined behaviour makes the step fail.
       - name: Run tests
         env:
