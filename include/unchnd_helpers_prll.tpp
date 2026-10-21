@@ -130,6 +130,14 @@ void UnchainedHashMap<Key, Value>::count_and_copy(  // size_t starting_partition
 
         const auto& allocators = partition_queues[part];
 
+
+        // This partition's slice of the directory. It was allocated without zeroing,
+        // so clear it here (in parallel across partitions) before counting into it.
+        size_t slots_per_partition = capacity / partition_queues.size();
+        size_t start_slot = part * slots_per_partition;
+        size_t end_slot   = (part + 1) * slots_per_partition;
+        std::fill(directory + start_slot, directory + end_slot, uint64_t{0});
+
         // We count how many tuples go into each slot. I might put the bloom bit calculation
         // here to follow the paper exactly. NOt right now.
         for( const auto& allocator : allocators){
@@ -157,9 +165,6 @@ void UnchainedHashMap<Key, Value>::count_and_copy(  // size_t starting_partition
         }
         // Convert offsets inside the array, to slots in the directory.
         size_t current_offset = partition_offsets[part];
-        size_t slots_per_partition = capacity / partition_queues.size();
-        size_t start_slot = part * slots_per_partition;
-        size_t end_slot = (part + 1) * slots_per_partition;
 
         // Each slot stores the START of the segment in the array. We move the pointer to
         // the end during the copying.

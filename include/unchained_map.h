@@ -39,9 +39,9 @@ private:
     static constexpr size_t HUGE_CHUNK = 2 * 1024 * 1024;
     static_assert(HUGE_CHUNK == ChunkPool::CHUNK_SIZE, "slab chunk size mismatch");
 
-    std::vector<uint64_t> directory_mem;
+    std::unique_ptr<uint64_t[]> directory_mem;   // capacity + 1 entries, not zero-initialized
     uint64_t* directory;
-    std::vector<StoredTuple> data;
+    std::unique_ptr<StoredTuple[]> data;          // filled completely by count_and_copy
 
     size_t num_elements;      
     size_t capacity;          
@@ -58,7 +58,7 @@ public:
 
     template <typename Func>
     void lookup(Key key, Func process_match);
-    
+
     // Probes a batch of up to PROBE_BATCH keys. Calls on_match(i, build_row) for every
     // build row whose key equals keys[i]. Same results as calling lookup() per key,
     // but organized in three tight loops so the CPU can overlap many memory accesses.

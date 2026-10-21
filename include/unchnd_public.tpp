@@ -10,7 +10,6 @@ UnchainedHashMap<Key, Value>::UnchainedHashMap(int initial_shift)
     : shift(initial_shift), num_elements(0) {
     
     capacity = 1ULL << (64 - shift);
-    directory_mem.resize(capacity);  
     precompute_bloom_tags();
 }
 
@@ -22,9 +21,12 @@ void UnchainedHashMap<Key, Value>::build(std::vector<column_t>& build_side_table
     if (total_rows > UINT32_MAX) throw std::runtime_error("build side too large for 32-bit row ids");
 
     calc_capacity();
-    directory_mem.assign(capacity + 1, 0);
 
-    directory = directory_mem.data() + 1;
+    // Allocated without zeroing (that used to be a serial memset of up to tens of MB).
+    // Each partition zeroes its own slice of the directory in count_and_copy, in parallel.
+    directory_mem.reset(new uint64_t[capacity + 1]);
+    directory_mem[0] = 0;                 // directory[-1]: start of the tuple storage
+    directory = directory_mem.get() + 1;
 
     size_t num_threads = pool().size();
     size_t num_partitions = calc_partition_num(total_rows);
@@ -71,8 +73,9 @@ void UnchainedHashMap<Key, Value>::build(std::vector<column_t>& build_side_table
         current_global_offset += partition_total_size;
     }
 
-    data.resize(current_global_offset);
-
+    // Not zero-initialized: count_and_copy writes every element.
+    data.reset(new StoredTuple[current_global_offset]);
+    
     std::vector<std::vector<BumpAlloc>> partition_queues(num_partitions);
 
     for(auto& q : partition_queues) q.reserve(num_threads);
