@@ -1,0 +1,76 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:        # also allows starting it by hand from the Actions tab
+
+jobs:
+  tests:
+    name: Build and run all tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # CMake downloads Catch2, abseil, re2, fmt, DuckDB, ... on every configure.
+      # Keeping them between runs makes the configure step much faster.
+      - name: Cache downloaded dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-release-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+
+      # Only the test programs: building `run` would compile all of DuckDB.
+      - name: Build tests
+        run: >
+          cmake --build build -j"$(nproc)" --target
+          unit_tests regression_tests test_algorithms test_indexing ex2_task3_hashes_tests
+
+      - name: End-to-end join tests
+        run: ./build/unit_tests
+
+      - name: Regression tests
+        run: ./build/regression_tests
+
+      - name: Hash table tests (Part 1 and 2)
+        run: |
+          ./build/test_algorithms
+          ./build/test_indexing
+          ./build/ex2_task3_hashes_tests
+
+  sanitizers:
+    name: Tests under AddressSanitizer + UndefinedBehaviorSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache downloaded dependencies
+        uses: actions/cache@v4
+        with:
+          path: build-san/_deps
+          key: deps-san-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure with sanitizers
+        run: >
+          cmake -S . -B build-san -DCMAKE_BUILD_TYPE=RelWithDebInfo -Wno-dev
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build tests
+        run: cmake --build build-san -j"$(nproc)" --target unit_tests regression_tests
+
+      # Any memory error, leak, or undefined behaviour makes the step fail.
+      - name: Run tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          ./build-san/unit_tests
+          ./build-san/regression_tests
