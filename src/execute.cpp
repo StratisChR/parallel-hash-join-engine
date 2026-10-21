@@ -24,7 +24,9 @@ namespace Contest {
 
 struct PhaseTimers {
     std::atomic<uint64_t> scan{0}, build{0}, probe{0}, merge{0},
-                          root_build{0}, root_probe{0}, root_finalize{0};
+                          root_build{0}, root_probe{0}, root_finalize{0},
+                          scan_int{0}, scan_str{0}, rows_int{0}, rows_str{0},
+                          root_rows{0}, root_str_values{0};
     // Intermediate joins grouped by build-side rows: <1k, 1k-100k, >=100k.
     std::atomic<uint64_t> joins_by_size[3]{}, us_by_size[3]{};
 };
@@ -492,6 +494,13 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
             result_table.num_rows = 0;
         }
 
+#ifdef PHASE_TIMERS
+        size_t str_cols = 0;
+        for (auto& [_, type] : output_attrs) if (type == DataType::VARCHAR) ++str_cols;
+        g_timers.root_rows       += result_table.num_rows;
+        g_timers.root_str_values += result_table.num_rows * str_cols;
+#endif
+
         return result_table;
     };
     
@@ -624,7 +633,16 @@ ExecuteResult execute_scan(const Plan& plan,
         }
 
         // Standard Copy Path
-        scan_copy_column(column, table_id, in_col_idx, target_col);
+        if (column.type == DataType::INT32) {
+            PHASE_TIMER(scan_int);
+            scan_copy_column(column, table_id, in_col_idx, target_col);
+        } else {
+            PHASE_TIMER(scan_str);
+            scan_copy_column(column, table_id, in_col_idx, target_col);
+        }
+#ifdef PHASE_TIMERS
+        (column.type == DataType::INT32 ? g_timers.rows_int : g_timers.rows_str) += target_col.size();
+#endif
     }
     return results;
 }
@@ -666,6 +684,11 @@ void destroy_context([[maybe_unused]] void* context) {
     for (int k = 0; k < 3; ++k)
         fprintf(stderr, "joins with build side %-7s: %4lu joins, %6.0f ms\n", label[k],
                 (unsigned long)g_timers.joins_by_size[k].load(), ms(g_timers.us_by_size[k]));
+    fprintf(stderr, "scan: INT32 with nulls %.0f ms (%.1f M rows) | VARCHAR (lazy) %.0f ms (%.1f M rows)\n",
+        ms(g_timers.scan_int), g_timers.rows_int.load() / 1e6,
+        ms(g_timers.scan_str), g_timers.rows_str.load() / 1e6);
+    fprintf(stderr, "root output: %.1f M rows, %.1f M string values\n",
+            g_timers.root_rows.load() / 1e6, g_timers.root_str_values.load() / 1e6);
 #endif
 }
 
