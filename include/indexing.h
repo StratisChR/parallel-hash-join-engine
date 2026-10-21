@@ -104,7 +104,25 @@ struct value_t {
     }
 };
 
-
+// ------------------------------------------------------------------------
+// Lazy strings. A string value produced by a scan is just (table, column, row):
+// no page is read when it is created, and joins copy it like any other value_t.
+// Only the final output turns it into characters (see resolve_string in execute.cpp).
+//   bit 61     : TYPE_MASK (string)
+//   bits 48-55 : table   (8 bits)
+//   bits 40-47 : column  (8 bits)
+//   bits  0-39 : row number within the input column (40 bits)
+// Whether the string is NULL is only known when it is resolved.
+// ------------------------------------------------------------------------
+inline value_t make_lazy_string(uint8_t table, uint8_t column, uint64_t row) {
+    value_t v;
+    v.data = value_t::TYPE_MASK | (uint64_t(table) << 48) | (uint64_t(column) << 40)
+           | (row & ((1ULL << 40) - 1));
+    return v;
+}
+inline uint8_t  lazy_string_table(value_t v)  { return (v.data >> 48) & 0xFF; }
+inline uint8_t  lazy_string_column(value_t v) { return (v.data >> 40) & 0xFF; }
+inline uint64_t lazy_string_row(value_t v)    { return v.data & ((1ULL << 40) - 1); }
 
 constexpr size_t PAGE_CAPACITY = 4096;
 
@@ -169,6 +187,19 @@ public:
     std::vector<std::byte*> view_pages;
     DataType view_type = DataType::INT32;
     bool is_view = false; // true when this column is a view into input pages
+
+    // Lazy string column: no data at all, row i reads as make_lazy_string(table, column, i).
+    bool    is_lazy_string = false;
+    uint8_t lazy_table = 0, lazy_column = 0;
+
+    void set_lazy_string(uint8_t table, uint8_t column, size_t rows) {
+        is_lazy_string = true;
+        lazy_table     = table;
+        lazy_column    = column;
+        total_items    = rows;
+    }
+
+
     // Starting row index for each page in `view_pages` (prefix sums). Used to
     // map a global index -> page when in view mode. view_page_offsets[i] is
     // the starting row index of view_pages[i].
@@ -202,6 +233,8 @@ public:
     // pages (is_view == true) we decode directly from the underlying Page
     // memory. Currently only optimized for INT32 no-null pages.
     value_t operator[](size_t idx) const {
+        if (is_lazy_string) return make_lazy_string(lazy_table, lazy_column, idx);
+
         if (!is_view) {
             return pages[idx / PAGE_CAPACITY]->data[idx % PAGE_CAPACITY];
         } else {

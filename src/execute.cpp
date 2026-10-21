@@ -10,6 +10,7 @@
 #include <mutex>
 #include <cassert>
 #include <algorithm>
+#include <cstring>
 #include "unchained_map.h"
 #include "threads.h"
 
@@ -47,36 +48,120 @@ struct ScopedTimer {
 
 using ExecuteResult = std::vector<column_t>;
 
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
+// For every string column scanned in the current query: the first row number of each
+// input page (a prefix sum of the page headers). Filled by the scans, which run on one
+// thread before any output is produced; read (never written) during output.
+struct StringColumnIndex {
+    const Column*       column = nullptr;
+    std::vector<size_t> first_row;   // first_row[p] = number of rows before page p; last entry = total
+    // Page holding row (b << BLOCK_SHIFT), for every block b of 1024 rows. Lets resolve_string
+    // find a row's page with a table lookup plus a few steps instead of a binary search.
+    static constexpr unsigned BLOCK_SHIFT = 10;
+    std::vector<uint32_t> block_page;
+};
+static std::vector<StringColumnIndex> g_string_columns(256 * 256);   // indexed by table * 256 + column
+static std::vector<size_t>            g_string_columns_used;         // slots filled in this query
 
-// Returns the characters of a non-null string value without allocating.
-// Short strings: a view straight into the input page.
-// Long strings span several pages, so they are assembled into `scratch` and the
-// view points there (valid until the next call with the same scratch).
-static std::string_view string_view_from_value(const Plan& plan, const value_t& vv, std::string& scratch) {
-    StringRef sref = vv.get_stringref();
-    const auto& column = plan.inputs[sref.table_id()].columns[sref.column_id()];
-    size_t page_id = sref.page_id();
+static inline StringColumnIndex& string_column_index(uint8_t table, uint8_t column) {
+    return g_string_columns[size_t(table) * 256 + column];
+}
 
-    if (sref.is_long()) {
+// Called at the start of every query. Input tables differ between queries, and a new
+// column can live at the same address as an old one, so old entries must not survive.
+static void reset_string_columns() {
+    for (size_t slot : g_string_columns_used) g_string_columns[slot] = StringColumnIndex{};
+    g_string_columns_used.clear();
+}
+
+// Scan of a VARCHAR column: reads only the page headers. No row is converted.
+static void scan_lazy_string_column(const Column& column, size_t table_id, size_t in_col_idx, column_t& target_col) {
+    assert(table_id < 256 && in_col_idx < 256);
+    StringColumnIndex& index = string_column_index(uint8_t(table_id), uint8_t(in_col_idx));
+    if (index.column != &column) {               // not indexed yet in this query
+        index.column = &column;
+        g_string_columns_used.push_back(table_id * 256 + in_col_idx);
+
+        index.first_row.assign(column.pages.size() + 1, 0);
+        for (size_t p = 0; p < column.pages.size(); ++p) {
+            uint16_t n = *reinterpret_cast<const uint16_t*>(column.pages[p]->data);
+            size_t rows = (n == 0xFFFF) ? 1 : (n == 0xFFFE) ? 0 : n;   // long start / continuation / normal
+            index.first_row[p + 1] = index.first_row[p] + rows;
+        }
+
+        // block_page[b] = the page whose row range contains row b << BLOCK_SHIFT.
+        const size_t total  = index.first_row.back();
+        const size_t blocks = (total >> StringColumnIndex::BLOCK_SHIFT) + 1;
+        index.block_page.resize(blocks);
+        size_t p = 0;
+        for (size_t b = 0; b < blocks; ++b) {
+            size_t row = b << StringColumnIndex::BLOCK_SHIFT;
+            while (p + 1 < column.pages.size() && index.first_row[p + 1] <= row) ++p;
+            index.block_page[b] = uint32_t(p);
+        }
+    }
+    target_col.set_lazy_string(uint8_t(table_id), uint8_t(in_col_idx), index.first_row.back());
+}
+
+// Number of set bits among the first `count` bits of a bitmap.
+static inline size_t count_set_bits(const uint8_t* bitmap, size_t count) {
+    size_t total = 0, i = 0;
+    for (; i + 64 <= count; i += 64) {
+        uint64_t w;
+        std::memcpy(&w, bitmap + i / 8, 8);
+        total += __builtin_popcountll(w);
+    }
+    for (; i + 8 <= count; i += 8) total += __builtin_popcount(bitmap[i / 8]);
+    if (i < count) total += __builtin_popcount(bitmap[i / 8] & ((1u << (count - i)) - 1));
+    return total;
+}
+
+// Turns a lazy string value into its characters. Returns false if the string is NULL.
+// Short strings: `out` points straight into the input page. Long strings are assembled
+// in `scratch` and `out` points there (valid until the next call with the same scratch).
+static bool resolve_string(value_t v, std::string& scratch, std::string_view& out) {
+    const StringColumnIndex& index = string_column_index(lazy_string_table(v), lazy_string_column(v));
+    assert(index.column != nullptr);
+    const Column& column = *index.column;
+    const size_t  row    = lazy_string_row(v);
+
+    // The page holding `row`: start at the page of its 1024-row block and step forward
+    // until the page's row range contains it. (Continuation pages of long strings hold
+    // no rows, so the loop steps over them.)
+    size_t p = index.block_page[row >> StringColumnIndex::BLOCK_SHIFT];
+    while (index.first_row[p + 1] <= row) ++p;
+
+    const std::byte* page   = column.pages[p]->data;
+    const uint16_t   header = *reinterpret_cast<const uint16_t*>(page);
+
+    if (header == 0xFFFF) {                       // long string: this page and its continuations
         scratch.clear();
-        size_t idx = page_id;
+        size_t idx = p;
         do {
-            auto* page = column.pages[idx]->data;
-            auto  n    = *reinterpret_cast<const uint16_t*>(page + 2);
-            scratch.append(reinterpret_cast<const char*>(page + 4), n);
+            auto* pg = column.pages[idx]->data;
+            scratch.append(reinterpret_cast<const char*>(pg + 4),
+                           *reinterpret_cast<const uint16_t*>(pg + 2));
             ++idx;
         } while (idx < column.pages.size() &&
-                 *reinterpret_cast<const uint16_t*>(column.pages[idx]->data) == 0xfffe);
-        return scratch;
+                 *reinterpret_cast<const uint16_t*>(column.pages[idx]->data) == 0xFFFE);
+        out = scratch;
+        return true;
     }
 
-    auto* page         = column.pages[page_id]->data;
-    auto  num_non_null = *reinterpret_cast<const uint16_t*>(page + 2);
-    auto* data_begin   = reinterpret_cast<const char*>(page + 4 + num_non_null * 2);
-    uint32_t off       = sref.offset();
-    return std::string_view(data_begin + (off >> 16), off & 0xFFFF);
+    const size_t   r      = row - index.first_row[p];             // row within the page
+    const uint16_t rows   = header;
+    const auto*    bitmap = reinterpret_cast<const uint8_t*>(page + PAGE_SIZE - (rows + 7) / 8);
+    if (!(bitmap[r / 8] & (1u << (r % 8)))) return false;        // NULL
+
+    const size_t   k            = count_set_bits(bitmap, r);     // non-null strings before this one
+    const uint16_t num_non_null = *reinterpret_cast<const uint16_t*>(page + 2);
+    const auto*    offsets      = reinterpret_cast<const uint16_t*>(page + 4);
+    const char*    chars        = reinterpret_cast<const char*>(page + 4 + 2 * size_t(num_non_null));
+    const uint16_t begin        = k ? offsets[k - 1] : 0;
+    out = std::string_view(chars + begin, offsets[k] - begin);
+    return true;
 }
+
+ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // Wrapper for writing to columnar tables during Root Join materialization
 struct ColumnWriter {
@@ -124,8 +209,9 @@ private:
     }
     
     void add_val_str(const value_t& v, const Plan& plan) {
-        if (v.is_null()) str_inserter->insert_null();
-        else str_inserter->insert(string_view_from_value(plan, v, scratch));
+        std::string_view sv;
+        if (v.is_null() || !resolve_string(v, scratch, sv)) str_inserter->insert_null();
+        else str_inserter->insert(sv);
     }
     
     void finalize_int() { int_inserter->finalize(); }
@@ -540,6 +626,7 @@ static void scan_copy_column(const Column& column, size_t table_id, size_t in_co
 
     // Pass 2: convert input page p into output rows [first_row[p], first_row[p+1]).
     auto convert_page = [&](size_t p) {
+        assert(column.type == DataType::INT32);
         const std::byte* page = column.pages[p]->data;
         const uint16_t header = *reinterpret_cast<const uint16_t*>(page);
         if (header == 0xFFFE) return;                               // long-string continuation: no row
@@ -550,12 +637,6 @@ static void scan_copy_column(const Column& column, size_t table_id, size_t in_co
             ++dst;
         };
 
-        if (header == 0xFFFF) {                                     // long-string start: one row
-            auto num_chars = *reinterpret_cast<const uint16_t*>(page + 2);
-            put(value_t(StringRef{tid, cid, static_cast<uint16_t>(p), static_cast<uint32_t>(num_chars), true}));
-            return;
-        }
-
         const uint16_t rows   = header;
         const auto*    bitmap = reinterpret_cast<const uint8_t*>(page + PAGE_SIZE - (rows + 7) / 8);
         if (column.type == DataType::INT32) {
@@ -563,20 +644,6 @@ static void scan_copy_column(const Column& column, size_t table_id, size_t in_co
             uint16_t data_idx = 0;
             for (uint16_t i = 0; i < rows; ++i)
                 put((bitmap[i / 8] & (1u << (i % 8))) ? value_t(int_data[data_idx++]) : value_t());
-        } else {                                                    // VARCHAR
-            const auto* str_offsets = reinterpret_cast<const uint16_t*>(page + 4);
-            uint16_t data_idx = 0;
-            uint32_t prev_end = 0;
-            for (uint16_t i = 0; i < rows; ++i) {
-                if (bitmap[i / 8] & (1u << (i % 8))) {
-                    uint32_t end_off = str_offsets[data_idx++];
-                    uint32_t packed  = (prev_end << 16) | ((end_off - prev_end) & 0xFFFF);
-                    prev_end = end_off;
-                    put(value_t(StringRef{tid, cid, static_cast<uint16_t>(p), packed, false}));
-                } else {
-                    put(value_t());
-                }
-            }
         }
     };
 
@@ -638,7 +705,7 @@ ExecuteResult execute_scan(const Plan& plan,
             scan_copy_column(column, table_id, in_col_idx, target_col);
         } else {
             PHASE_TIMER(scan_str);
-            scan_copy_column(column, table_id, in_col_idx, target_col);
+            scan_lazy_string_column(column, table_id, in_col_idx, target_col);
         }
 #ifdef PHASE_TIMERS
         (column.type == DataType::INT32 ? g_timers.rows_int : g_timers.rows_str) += target_col.size();
@@ -662,6 +729,7 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 }
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+    reset_string_columns();
     auto& root_node = plan.nodes[plan.root];
     auto& j = std::get<JoinNode>(root_node.data);
     return execute_hash_join_root(plan, j, root_node.output_attrs);
