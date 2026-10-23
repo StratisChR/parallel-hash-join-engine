@@ -383,4 +383,68 @@ TEST_CASE("Result does not depend on the plan's build side", "[join]") {
             REQUIRE(run_plan(plan) == expected_join(L, R, 0, 0, {1, 3}));
         }
     }
+}// Random bushy plans over 2-7 tables, with duplicate keys, NULL keys and strings. The
+// engine may run the joins in any order it likes; the result must match the plan's.
+TEST_CASE("Random multi-way plans give the plan's result in any join order", "[join][order]") {
+    std::mt19937 rng(2024);
+    for (int round = 0; round < 40; ++round) {
+        const size_t n_tables = 2 + rng() % 6;
+        std::vector<Rows> tables(n_tables);
+        const std::vector<DataType> types{DataType::INT32, DataType::INT32, DataType::VARCHAR};
+        for (auto& t : tables) {
+            size_t rows = 20 + rng() % 400;
+            int32_t domain = 20 + int32_t(rng() % 200);
+            for (size_t i = 0; i < rows; ++i)
+                t.push_back({(rng() % 10 == 0) ? Data{std::monostate{}} : Data{int32_t(rng() % domain)},
+                             (rng() % 10 == 0) ? Data{std::monostate{}} : Data{int32_t(rng() % domain)},
+                             (rng() % 7 == 0)  ? Data{std::monostate{}} : Data{random_string(rng, 8)}});
+        }
+
+        // Every node keeps all columns; parts[i] = (plan node, expected rows).
+        Plan plan;
+        std::vector<std::pair<size_t, Rows>> parts;
+        for (size_t t = 0; t < n_tables; ++t) {
+            parts.push_back({plan.new_scan_node(t, all_columns(types)), tables[t]});
+            plan.inputs.push_back(Table(tables[t], types).to_columnar());
+        }
+        bool too_big = false;
+        while (parts.size() > 1) {
+            size_t i = rng() % parts.size();
+            size_t j = rng() % (parts.size() - 1);
+            if (j >= i) ++j;
+            auto L = std::move(parts[i]), R = std::move(parts[j]);
+            parts.erase(parts.begin() + std::max(i, j));
+            parts.erase(parts.begin() + std::min(i, j));
+
+            auto& l_attrs = plan.nodes[L.first].output_attrs;
+            auto& r_attrs = plan.nodes[R.first].output_attrs;
+            // Join keys: any INT32 column on each side.
+            std::vector<size_t> l_int, r_int;
+            for (size_t c = 0; c < l_attrs.size(); ++c) if (std::get<1>(l_attrs[c]) == DataType::INT32) l_int.push_back(c);
+            for (size_t c = 0; c < r_attrs.size(); ++c) if (std::get<1>(r_attrs[c]) == DataType::INT32) r_int.push_back(c);
+            size_t lk = l_int[rng() % l_int.size()], rk = r_int[rng() % r_int.size()];
+
+            const bool last = parts.empty();
+            std::vector<size_t> out;
+            for (size_t c = 0; c < l_attrs.size() + r_attrs.size(); ++c)
+                if (!last || rng() % 2 == 0) out.push_back(c);
+            if (out.empty()) out.push_back(0);
+
+            std::vector<std::tuple<size_t, DataType>> attrs;
+            for (size_t c : out)
+                attrs.emplace_back(c, c < l_attrs.size() ? std::get<1>(l_attrs[c])
+                                                         : std::get<1>(r_attrs[c - l_attrs.size()]));
+            size_t node = plan.new_join_node(rng() % 2, L.first, R.first, lk, rk, attrs);
+            Rows rows = expected_join(L.second, R.second, lk, rk, out);
+            if (rows.size() > 300000) { too_big = true; break; }
+            parts.push_back({node, std::move(rows)});
+        }
+        if (too_big) continue;
+        plan.root = parts[0].first;
+
+        Rows got = run_plan(plan);
+        INFO("round " << round << ", " << n_tables << " tables");
+        REQUIRE(got.size() == parts[0].second.size());
+        REQUIRE(got == parts[0].second);
+    }
 }

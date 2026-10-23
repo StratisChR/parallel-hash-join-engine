@@ -154,6 +154,68 @@ static void mat_record(size_t n, const std::vector<column_t>& result) {
 #endif
 // ---------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------
+// Join statistics (measurement only, off by default).
+// Records every join's input and output sizes, in execution order. Prints one line per
+// query, and at exit the joins of the queries with the most intermediate rows.
+// #define JOIN_STATS
+#ifdef JOIN_STATS
+struct JoinRecord { size_t left, right, out; bool root; };
+struct QueryRecord {
+    size_t index;
+    std::vector<JoinRecord> joins;
+    uint64_t intermediate() const {
+        uint64_t s = 0;
+        for (auto& j : joins) if (!j.root) s += j.out;
+        return s;
+    }
+    size_t result() const { return joins.empty() ? 0 : joins.back().out; }
+};
+struct JoinStats {
+    std::vector<QueryRecord> queries;
+    std::vector<JoinRecord>  current;
+    ~JoinStats() {
+        if (queries.empty()) return;
+        uint64_t inter = 0, res = 0;
+        for (auto& q : queries) { inter += q.intermediate(); res += q.result(); }
+        std::fprintf(stderr, "\nall queries: intermediate %.1f M rows, results %.1f M rows\n",
+                     inter / 1e6, res / 1e6);
+
+        std::vector<const QueryRecord*> top;
+        for (auto& q : queries) top.push_back(&q);
+        std::sort(top.begin(), top.end(), [](auto* a, auto* b) { return a->intermediate() > b->intermediate(); });
+        if (top.size() > 12) top.resize(12);
+
+        std::fprintf(stderr, "\nqueries with the most intermediate rows (joins in execution order):\n");
+        for (auto* q : top) {
+            std::fprintf(stderr, "query #%zu: intermediate %.2f M, result %.2f M\n",
+                         q->index, q->intermediate() / 1e6, q->result() / 1e6);
+            for (auto& j : q->joins)
+                std::fprintf(stderr, "    %10zu x %10zu -> %10zu%s\n",
+                             j.left, j.right, j.out, j.root ? "   (root)" : "");
+        }
+    }
+};
+inline JoinStats g_join_stats;
+
+static void join_record(size_t left, size_t right, size_t out, bool root) {
+    g_join_stats.current.push_back({left, right, out, root});
+}
+static void join_query_done() {
+    QueryRecord q{g_join_stats.queries.size() + 1, std::move(g_join_stats.current)};
+    g_join_stats.current.clear();
+    std::fprintf(stderr, "query #%zu: %zu joins, intermediate %.2f M rows, result %.2f M rows\n",
+                 q.index, q.joins.size(), q.intermediate() / 1e6, q.result() / 1e6);
+    g_join_stats.queries.push_back(std::move(q));
+}
+#define JOIN_RECORD(l, r, out, root) join_record(l, r, out, root)
+#define JOIN_QUERY_DONE()            join_query_done()
+#else
+#define JOIN_RECORD(l, r, out, root)
+#define JOIN_QUERY_DONE()
+#endif
+// ---------------------------------------------------------------------------------
+
 // For every string column scanned in the current query: the first row number of each
 // input page (a prefix sum of the page headers). Filled by the scans, which run on one
 // thread before any output is produced; read (never written) during output.
@@ -549,67 +611,40 @@ struct JoinAlgorithm {
     }
 };
 
-ExecuteResult execute_hash_join(const Plan& plan,
-                                const JoinNode& join,
-                                const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+// Joins two materialized inputs on left[left_attr] = right[right_attr]. output_attrs index
+// into the columns of left followed by the columns of right.
+static ExecuteResult join_inputs(const Plan& plan, ExecuteResult& left, ExecuteResult& right,
+                                 size_t left_attr, size_t right_attr, DataType key_type,
+                                 const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    // Build on the smaller input. A join's result is the same either way.
+    bool build_left = left[left_attr].size() <= right[right_attr].size();
 
-    auto left_idx    = join.left;
-    auto right_idx   = join.right;
-    auto& left_node  = plan.nodes[left_idx];
-    auto& right_node = plan.nodes[right_idx];
-    auto& left_types = left_node.output_attrs;
-    auto& right_types = right_node.output_attrs;
-
-    auto left  = execute_impl(plan, left_idx);
-    auto right = execute_impl(plan, right_idx);
-
-    // Build on the smaller input. The plan's build side comes from PostgreSQL's size
-    // *estimates*; here we know the actual sizes. A join's result is the same either way.
-    bool build_left = left[join.left_attr].size() <= right[join.right_attr].size();
-
-    ExecuteResult results;
-    results.reserve(output_attrs.size());
-    for(size_t i = 0; i < output_attrs.size(); ++i) {
-        results.emplace_back();
-    }
-
+    ExecuteResult results(output_attrs.size());
     JoinAlgorithm join_algorithm{
         .build_left    = build_left,
         .left          = left,
         .right         = right,
         .results       = results,
-        .left_col      = join.left_attr,
-        .right_col     = join.right_attr,
+        .left_col      = left_attr,
+        .right_col     = right_attr,
         .output_attrs  = output_attrs,
         .plan_ptr      = &plan
     };
-
-    if (build_left) {
-        switch (std::get<1>(left_types[join.left_attr])) {
-            case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-            default: throw std::runtime_error("unsupported join key type");
-        }
-    } else {
-        switch (std::get<1>(right_types[join.right_attr])) {
-            case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-            default: throw std::runtime_error("unsupported join key type");
-        }
+    switch (key_type) {
+        case DataType::INT32: join_algorithm.run<int32_t>(); break;
+        default: throw std::runtime_error("unsupported join key type");
     }
 
+    JOIN_RECORD(left[left_attr].size(), right[right_attr].size(),
+                results.empty() ? 0 : results[0].size(), false);
     return results;
 }
 
-ColumnarTable execute_hash_join_root(const Plan& plan,
-                                     const JoinNode& join,
-                                     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-
-    auto left  = execute_impl(plan, join.left);
-    auto right = execute_impl(plan, join.right);
-
-    bool build_left = left[join.left_attr].size() <= right[join.right_attr].size();
-
-    auto& left_types  = plan.nodes[join.left].output_attrs;
-    auto& right_types = plan.nodes[join.right].output_attrs;
+// The last join of a query: writes the result straight into the output format.
+static ColumnarTable root_join_inputs(const Plan& plan, ExecuteResult& left, ExecuteResult& right,
+                                      size_t left_attr, size_t right_attr, DataType key_type,
+                                      const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    bool build_left = left[left_attr].size() <= right[right_attr].size();
 
     using RootResultType = std::vector<ColumnWriter>;
 
@@ -619,12 +654,12 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
         UnchainedHashMap<T, size_t> hash_table;
 
         ExecuteResult& build_table = build_left ? left : right;
-        size_t build_col_idx = build_left ? join.left_attr : join.right_attr;
+        size_t build_col_idx = build_left ? left_attr : right_attr;
 
         { PHASE_TIMER(root_build); hash_table.build(build_table, build_col_idx); }
 
         ExecuteResult& probe_table = build_left ? right : left;
-        size_t probe_idx = build_left ? join.right_attr : join.left_attr;
+        size_t probe_idx = build_left ? right_attr : left_attr;
         size_t left_table_cols = left.size();
 
         std::vector<RootResultType> thread_results;
@@ -683,6 +718,8 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
         } else {
             result_table.num_rows = 0;
         }
+        JOIN_RECORD(left[left_attr].size(), right[right_attr].size(),
+                    result_table.num_rows, true);
 
 #ifdef PHASE_TIMERS
         size_t str_cols = 0;
@@ -695,14 +732,30 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
     };
 
     struct IntTag { using type = int32_t; };
-    DataType key_type = build_left ? std::get<1>(left_types[join.left_attr])
-                                        : std::get<1>(right_types[join.right_attr]);
-
     if (key_type == DataType::INT32) {
         return run_root_join(IntTag{});
     } else {
         throw std::runtime_error("Unsupported join key type in root join");
     }
+}
+
+// Joins in the order the plan gives.
+ExecuteResult execute_hash_join(const Plan& plan,
+                                const JoinNode& join,
+                                const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    auto left  = execute_impl(plan, join.left);
+    auto right = execute_impl(plan, join.right);
+    DataType key_type = std::get<1>(plan.nodes[join.left].output_attrs[join.left_attr]);
+    return join_inputs(plan, left, right, join.left_attr, join.right_attr, key_type, output_attrs);
+}
+
+ColumnarTable execute_hash_join_root(const Plan& plan,
+                                     const JoinNode& join,
+                                     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    auto left  = execute_impl(plan, join.left);
+    auto right = execute_impl(plan, join.right);
+    DataType key_type = std::get<1>(plan.nodes[join.left].output_attrs[join.left_attr]);
+    return root_join_inputs(plan, left, right, join.left_attr, join.right_attr, key_type, output_attrs);
 }
 
 // Converts one input column (any column the zero-copy view can't handle) into value_t pages.
@@ -834,12 +887,165 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         node.data);
 }
 
+// ---------------------------------------------------------------------------------
+// Join ordering at run time.
+//
+// Every join in a plan compares one column of its left side with one column of its right
+// side, and a plan over n scans has n-1 joins. So the join conditions form a tree over the
+// scans, and joining any two groups of scans that one condition connects gives the same
+// result as the plan, in any order. We ignore the plan's tree, run every scan, and then
+// repeatedly execute the condition whose two inputs are currently smallest. After each
+// join its real size is known, so later choices use exact sizes, not estimates.
+// Comment out USE_JOIN_ORDER to run joins in the plan's order instead.
+// #define USE_JOIN_ORDER
+
+// A column of a scan node: the scan's node index and the column's position in its output.
+struct BaseCol {
+    size_t scan, col;
+    bool operator==(const BaseCol& o) const { return scan == o.scan && col == o.col; }
+};
+
+struct JoinEdge { BaseCol left, right; };
+
+// The result of joining a group of scans so far.
+struct Component {
+    ExecuteResult        cols;
+    std::vector<BaseCol> refs;   // refs[i]: which base column cols[i] holds
+    size_t               rows = 0;
+};
+
+// Which base column each output column of `node` comes from.
+static void base_cols(const Plan& plan, size_t node, std::vector<std::vector<BaseCol>>& out) {
+    auto& n = plan.nodes[node];
+    auto& o = out[node];
+    o.resize(n.output_attrs.size());
+    if (auto* j = std::get_if<JoinNode>(&n.data)) {
+        base_cols(plan, j->left, out);
+        base_cols(plan, j->right, out);
+        size_t nl = plan.nodes[j->left].output_attrs.size();
+        for (size_t c = 0; c < o.size(); ++c) {
+            size_t s = std::get<0>(n.output_attrs[c]);
+            o[c] = s < nl ? out[j->left][s] : out[j->right][s - nl];
+        }
+    } else {
+        for (size_t c = 0; c < o.size(); ++c) o[c] = BaseCol{node, c};
+    }
+}
+
+static void collect(const Plan& plan, size_t node, const std::vector<std::vector<BaseCol>>& bc,
+                    std::vector<size_t>& scans, std::vector<JoinEdge>& edges) {
+    auto& n = plan.nodes[node];
+    if (auto* j = std::get_if<JoinNode>(&n.data)) {
+        edges.push_back({bc[j->left][j->left_attr], bc[j->right][j->right_attr]});
+        collect(plan, j->left, bc, scans, edges);
+        collect(plan, j->right, bc, scans, edges);
+    } else {
+        scans.push_back(node);
+    }
+}
+
+static DataType base_type(const Plan& plan, BaseCol c) {
+    return std::get<1>(plan.nodes[c.scan].output_attrs[c.col]);
+}
+
+static ColumnarTable execute_reordered(const Plan& plan) {
+    const auto& root = plan.nodes[plan.root];
+
+    std::vector<std::vector<BaseCol>> bc(plan.nodes.size());
+    base_cols(plan, plan.root, bc);
+
+    std::vector<size_t>   scans;
+    std::vector<JoinEdge> edges;
+    collect(plan, plan.root, bc, scans, edges);
+    const std::vector<BaseCol>& final_cols = bc[plan.root];
+
+    // Run every scan; each one starts as its own component.
+    std::vector<Component> comps;
+    std::vector<size_t>    comp_of(plan.nodes.size(), SIZE_MAX);   // scan node -> component
+    for (size_t s : scans) {
+        Component c;
+        c.cols = execute_scan(plan, std::get<ScanNode>(plan.nodes[s].data), plan.nodes[s].output_attrs);
+        for (size_t i = 0; i < c.cols.size(); ++i) c.refs.push_back(BaseCol{s, i});
+        c.rows = c.cols.empty() ? 0 : c.cols[0].size();
+        comp_of[s] = comps.size();
+        comps.push_back(std::move(c));
+    }
+
+    std::vector<bool> done(edges.size(), false);
+
+    // A base column is still needed if the final result shows it, or a join that has
+    // not run yet uses it as its key.
+    auto needed = [&](BaseCol c) {
+        for (auto& f : final_cols) if (f == c) return true;
+        for (size_t e = 0; e < edges.size(); ++e)
+            if (!done[e] && (edges[e].left == c || edges[e].right == c)) return true;
+        return false;
+    };
+    auto find = [](const Component& comp, BaseCol c) {
+        for (size_t i = 0; i < comp.refs.size(); ++i) if (comp.refs[i] == c) return i;
+        throw std::runtime_error("join ordering: column not found");
+    };
+
+    for (size_t step = 0; step < edges.size(); ++step) {
+        // The join whose two inputs are smallest together.
+        size_t best = SIZE_MAX, best_cost = SIZE_MAX;
+        for (size_t e = 0; e < edges.size(); ++e) {
+            if (done[e]) continue;
+            size_t a = comp_of[edges[e].left.scan], b = comp_of[edges[e].right.scan];
+            if (a == b) throw std::runtime_error("join ordering: join graph has a cycle");
+            size_t cost = comps[a].rows + comps[b].rows;
+            if (cost < best_cost) { best_cost = cost; best = e; }
+        }
+        done[best] = true;
+        const JoinEdge& edge = edges[best];
+        size_t a = comp_of[edge.left.scan], b = comp_of[edge.right.scan];
+        Component& L = comps[a];
+        Component& R = comps[b];
+        size_t l_attr = find(L, edge.left), r_attr = find(R, edge.right);
+        DataType key_type = base_type(plan, edge.left);
+
+        if (step + 1 == edges.size()) {
+            // Last join: produce the final columns in the plan's order.
+            std::vector<std::tuple<size_t, DataType>> out;
+            for (auto& f : final_cols) {
+                size_t i = (comp_of[f.scan] == a) ? find(L, f) : L.cols.size() + find(R, f);
+                out.emplace_back(i, base_type(plan, f));
+            }
+            return root_join_inputs(plan, L.cols, R.cols, l_attr, r_attr, key_type, out);
+        }
+
+        // Intermediate join: keep only the columns something later still needs.
+        std::vector<std::tuple<size_t, DataType>> out;
+        Component J;
+        for (size_t i = 0; i < L.refs.size(); ++i)
+            if (needed(L.refs[i])) { out.emplace_back(i, base_type(plan, L.refs[i])); J.refs.push_back(L.refs[i]); }
+        for (size_t i = 0; i < R.refs.size(); ++i)
+            if (needed(R.refs[i])) { out.emplace_back(L.cols.size() + i, base_type(plan, R.refs[i])); J.refs.push_back(R.refs[i]); }
+        J.cols = join_inputs(plan, L.cols, R.cols, l_attr, r_attr, key_type, out);
+        J.rows = J.cols.empty() ? 0 : J.cols[0].size();
+
+        // The joined result replaces component a; component b is emptied.
+        for (size_t s : scans) if (comp_of[s] == b) comp_of[s] = a;
+        comps[a] = std::move(J);
+        comps[b] = Component{};
+    }
+    // A plan with no joins never reaches here: the root is always a join.
+    throw std::runtime_error("join ordering: no joins");
+}
+// ---------------------------------------------------------------------------------
+
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     reset_string_columns();
     MAT_ANALYZE(plan);
+#ifdef USE_JOIN_ORDER
+    auto result = execute_reordered(plan);
+#else
     auto& root_node = plan.nodes[plan.root];
     auto& j = std::get<JoinNode>(root_node.data);
-    return execute_hash_join_root(plan, j, root_node.output_attrs);
+    auto result = execute_hash_join_root(plan, j, root_node.output_attrs);
+#endif
+    JOIN_QUERY_DONE();
+    return result;
 }
 
 void* build_context() {
