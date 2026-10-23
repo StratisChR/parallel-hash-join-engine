@@ -3,26 +3,23 @@
 #include <table.h>
 #include <stdexcept>
 #include <variant>
-#include <thread>
 #include <atomic>
 #include <cassert>
 #include <algorithm>
 #include <cstring>
+#include <functional>
+#include <chrono>
+#include <cstdio>
 
 #include "hashtable/unchained_map.h"
 #include "engine/thread_pool.h"
 #include "engine/column.h"
 
-
 namespace Contest {
-    
-// #define PHASE_TIMERS   // comment this line out to switch all timing off
+
+// #define PHASE_TIMERS   // uncomment to print a per-phase time breakdown at the end of a run
 
 #ifdef PHASE_TIMERS
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-
 struct PhaseTimers {
     std::atomic<uint64_t> scan{0}, build{0}, probe{0}, merge{0},
                           root_build{0}, root_probe{0}, root_finalize{0},
@@ -47,6 +44,115 @@ struct ScopedTimer {
 #endif
 
 using ExecuteResult = std::vector<column_t>;
+
+// ---------------------------------------------------------------------------------
+// Materialization statistics (measurement only, off by default).
+// For every intermediate join it counts the values written into the result, split into
+//   - key values:     columns that some join further up uses as its join key,
+//   - carried values: columns no join uses, copied along only to reach the root output.
+// It also estimates what a row-id design would write instead: the key columns plus one
+// row id per base table that still has carried columns.
+// #define MATERIALIZATION_STATS
+#ifdef MATERIALIZATION_STATS
+struct MatStats {
+    uint64_t joins = 0, rows = 0, values = 0, key_values = 0, rowid_values = 0;
+    ~MatStats() {
+        if (joins == 0) return;
+        auto M = [](uint64_t v) { return v / 1e6; };
+        uint64_t carried = values - key_values;
+        uint64_t alt     = key_values + rowid_values;
+        std::fprintf(stderr,
+            "intermediate joins: %llu, result rows: %.1f M\n"
+            "values written now:      %8.1f M\n"
+            "  join keys:             %8.1f M (%.0f%%)\n"
+            "  carried to root only:  %8.1f M (%.0f%%)\n"
+            "with row ids instead:    %8.1f M (keys %.1f M + row ids %.1f M) = %.0f%% of now\n",
+            (unsigned long long)joins, M(rows), M(values),
+            M(key_values), 100.0 * key_values / values,
+            M(carried),    100.0 * carried / values,
+            M(alt), M(key_values), M(rowid_values), 100.0 * alt / values);
+    }
+};
+inline MatStats g_mat;
+static std::vector<std::vector<bool>>   g_mat_key_cols;  // [node][output col]: used as a key above
+static std::vector<std::vector<size_t>> g_mat_origin;    // [node][output col]: scan node it comes from
+
+// Walks the plan once per query, before execution.
+static void mat_analyze(const Plan& plan) {
+    const size_t N = plan.nodes.size();
+    g_mat_key_cols.assign(N, {});
+    g_mat_origin.assign(N, {});
+
+    // Bottom-up: which scan does each output column come from?
+    std::function<void(size_t)> origin = [&](size_t n) {
+        auto& node = plan.nodes[n];
+        auto& o = g_mat_origin[n];
+        o.resize(node.output_attrs.size());
+        if (auto* j = std::get_if<JoinNode>(&node.data)) {
+            origin(j->left);
+            origin(j->right);
+            size_t nl = plan.nodes[j->left].output_attrs.size();
+            for (size_t c = 0; c < o.size(); ++c) {
+                size_t s = std::get<0>(node.output_attrs[c]);
+                o[c] = s < nl ? g_mat_origin[j->left][s] : g_mat_origin[j->right][s - nl];
+            }
+        } else {
+            for (auto& x : o) x = n;
+        }
+    };
+
+    // Top-down: which output columns of each node does some join above use as its key?
+    std::function<void(size_t)> keys = [&](size_t n) {
+        auto& node = plan.nodes[n];
+        auto* j = std::get_if<JoinNode>(&node.data);
+        if (!j) return;
+        size_t nl = plan.nodes[j->left].output_attrs.size();
+        auto& kl = g_mat_key_cols[j->left];
+        auto& kr = g_mat_key_cols[j->right];
+        kl.assign(nl, false);
+        kr.assign(plan.nodes[j->right].output_attrs.size(), false);
+        kl[j->left_attr]  = true;
+        kr[j->right_attr] = true;
+        for (size_t c = 0; c < node.output_attrs.size(); ++c) {
+            if (!g_mat_key_cols[n][c]) continue;
+            size_t s = std::get<0>(node.output_attrs[c]);
+            if (s < nl) kl[s] = true; else kr[s - nl] = true;
+        }
+        keys(j->left);
+        keys(j->right);
+    };
+
+    origin(plan.root);
+    g_mat_key_cols[plan.root].assign(plan.nodes[plan.root].output_attrs.size(), false);
+    keys(plan.root);
+}
+
+// Called after each intermediate join with its result.
+static void mat_record(size_t n, const std::vector<column_t>& result) {
+    const size_t cols = result.size();
+    const size_t rows = cols ? result[0].size() : 0;
+    size_t key_cols = 0;
+    std::vector<size_t> carried_scans;
+    for (size_t c = 0; c < cols; ++c) {
+        if (g_mat_key_cols[n][c]) ++key_cols;
+        else carried_scans.push_back(g_mat_origin[n][c]);
+    }
+    std::sort(carried_scans.begin(), carried_scans.end());
+    size_t scans = std::unique(carried_scans.begin(), carried_scans.end()) - carried_scans.begin();
+
+    g_mat.joins        += 1;
+    g_mat.rows         += rows;
+    g_mat.values       += uint64_t(rows) * cols;
+    g_mat.key_values   += uint64_t(rows) * key_cols;
+    g_mat.rowid_values += uint64_t(rows) * scans;
+}
+#define MAT_ANALYZE(plan)          mat_analyze(plan)
+#define MAT_RECORD(node, result)   mat_record(node, result)
+#else
+#define MAT_ANALYZE(plan)
+#define MAT_RECORD(node, result)
+#endif
+// ---------------------------------------------------------------------------------
 
 // For every string column scanned in the current query: the first row number of each
 // input page (a prefix sum of the page headers). Filled by the scans, which run on one
@@ -174,7 +280,7 @@ struct ColumnWriter {
     void (ColumnWriter::*add_val_impl)(const value_t&, const Plan&) = nullptr;
     void (ColumnWriter::*finalize_impl)() = nullptr;
 
-    ColumnWriter() = default; 
+    ColumnWriter() = default;
     ColumnWriter(ColumnWriter&&) = default;
     ColumnWriter& operator=(ColumnWriter&&) = default;
 
@@ -195,7 +301,7 @@ struct ColumnWriter {
     void add_val(const value_t& v, const Plan& plan) {
         (this->*add_val_impl)(v, plan);
     }
-    
+
     void finalize() {
         if (col) {
             (this->*finalize_impl)();
@@ -207,13 +313,13 @@ private:
         if (v.is_null()) int_inserter->insert_null();
         else int_inserter->insert(v.get_int());
     }
-    
+
     void add_val_str(const value_t& v, const Plan& plan) {
         std::string_view sv;
         if (v.is_null() || !resolve_string(v, scratch, sv)) str_inserter->insert_null();
         else str_inserter->insert(sv);
     }
-    
+
     void finalize_int() { int_inserter->finalize(); }
     void finalize_str() { str_inserter->finalize(); }
 };
@@ -272,7 +378,7 @@ static void merge_thread_results(std::vector<column_t>& results,
 
 // Logic shared between standard Join and Root Join
 struct JoinLogic{
-    
+
     template <typename T, typename ResultContainer, typename MaterializeFn>
     static std::vector<ResultContainer> run_probe(
         UnchainedHashMap<T, size_t>& hash_table,
@@ -374,18 +480,17 @@ struct JoinAlgorithm {
     const std::vector<std::tuple<size_t, DataType>>&  output_attrs;
     const Plan* plan_ptr;
 
-    
     template <class T>
     auto run() {
-#ifdef PHASE_TIMERS                                                       // NEW
-        auto join_start = std::chrono::steady_clock::now();              // NEW
-#endif                                                                    // NEW
+#ifdef PHASE_TIMERS
+        auto join_start = std::chrono::steady_clock::now();
+#endif
         UnchainedHashMap<T, size_t> hash_table;
 
         // Build Phase
         ExecuteResult& build_table = build_left ? left : right;
         size_t build_idx = build_left ? left_col : right_col;
-        { PHASE_TIMER(build); hash_table.build(build_table, build_idx); }   // CHANGED: wrapped
+        { PHASE_TIMER(build); hash_table.build(build_table, build_idx); }
 
         // Probe Phase
         ExecuteResult& probe_table = build_left ? right : left;
@@ -401,10 +506,10 @@ struct JoinAlgorithm {
                                                         : OutSource{&right[src_col - left_table_cols], false});
         const size_t num_cols = sources.size();
 
-        std::vector<ExecuteResult> thread_results;                         // CHANGED: declared first
-        {                                                                  // NEW
-            PHASE_TIMER(probe);                                            // NEW
-            thread_results = JoinLogic::run_probe<T, ExecuteResult>(       // CHANGED: no "auto"
+        std::vector<ExecuteResult> thread_results;
+        {
+            PHASE_TIMER(probe);
+            thread_results = JoinLogic::run_probe<T, ExecuteResult>(
                 hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
                 [&](ExecuteResult& local, size_t l_idx, size_t r_idx) {
                     if (num_cols == 0) return;
@@ -421,34 +526,33 @@ struct JoinAlgorithm {
                     local[0].total_items = n + 1;
                 }
             );
-        }                                                                  // NEW
+        }
 
         // Give every output column the row count that column 0 tracked.
         for (auto& local : thread_results)
             for (size_t c = 1; c < num_cols; ++c) local[c].total_items = local[0].total_items;
 
         // Merge Phase
-        {                                                                  // NEW
-            PHASE_TIMER(merge);                                            // NEW
+        {
+            PHASE_TIMER(merge);
             results.resize(output_attrs.size());
             merge_thread_results(results, thread_results, output_attrs.size());
-        }                                                                  // NEW
+        }
 
-#ifdef PHASE_TIMERS                                                       // NEW
-        size_t b = build_table[build_idx].size();                         // NEW
-        int k = b < 1000 ? 0 : (b < 100000 ? 1 : 2);                       // NEW
-        g_timers.joins_by_size[k]++;                                      // NEW
-        g_timers.us_by_size[k] += std::chrono::duration_cast<std::chrono::microseconds>(   // NEW
-                                      std::chrono::steady_clock::now() - join_start).count();  // NEW
-#endif                                                                    // NEW
+#ifdef PHASE_TIMERS
+        size_t b = build_table[build_idx].size();
+        int k = b < 1000 ? 0 : (b < 100000 ? 1 : 2);
+        g_timers.joins_by_size[k]++;
+        g_timers.us_by_size[k] += std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - join_start).count();
+#endif
     }
 };
-
 
 ExecuteResult execute_hash_join(const Plan& plan,
                                 const JoinNode& join,
                                 const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    
+
     auto left_idx    = join.left;
     auto right_idx   = join.right;
     auto& left_node  = plan.nodes[left_idx];
@@ -466,7 +570,7 @@ ExecuteResult execute_hash_join(const Plan& plan,
     ExecuteResult results;
     results.reserve(output_attrs.size());
     for(size_t i = 0; i < output_attrs.size(); ++i) {
-        results.emplace_back(); 
+        results.emplace_back();
     }
 
     JoinAlgorithm join_algorithm{
@@ -498,7 +602,7 @@ ExecuteResult execute_hash_join(const Plan& plan,
 ColumnarTable execute_hash_join_root(const Plan& plan,
                                      const JoinNode& join,
                                      const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    
+
     auto left  = execute_impl(plan, join.left);
     auto right = execute_impl(plan, join.right);
 
@@ -517,16 +621,16 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
         ExecuteResult& build_table = build_left ? left : right;
         size_t build_col_idx = build_left ? join.left_attr : join.right_attr;
 
-        { PHASE_TIMER(root_build); hash_table.build(build_table, build_col_idx); }   // CHANGED: wrapped
+        { PHASE_TIMER(root_build); hash_table.build(build_table, build_col_idx); }
 
         ExecuteResult& probe_table = build_left ? right : left;
         size_t probe_idx = build_left ? join.right_attr : join.left_attr;
         size_t left_table_cols = left.size();
 
-        std::vector<RootResultType> thread_results;                          // CHANGED: declared first
-        {                                                                    // NEW
-            PHASE_TIMER(root_probe);                                         // NEW
-            thread_results = JoinLogic::run_probe<T, RootResultType>(        // CHANGED: no "auto"
+        std::vector<RootResultType> thread_results;
+        {
+            PHASE_TIMER(root_probe);
+            thread_results = JoinLogic::run_probe<T, RootResultType>(
                 hash_table, probe_table, probe_idx, build_left, output_attrs.size(),
                 [&](RootResultType& writers, size_t l_idx, size_t r_idx) {
                     if (writers.empty()) writers.resize(output_attrs.size());
@@ -544,32 +648,32 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
                     }
                 }
             );
-        }                                                                    // NEW
+        }
 
-        PHASE_TIMER(root_finalize);   // NEW: measures from here until the lambda returns
+        PHASE_TIMER(root_finalize);
         ColumnarTable result_table;
 
         result_table.columns.reserve(output_attrs.size());
-        
+
         for (size_t col_idx = 0; col_idx < output_attrs.size(); ++col_idx) {
             DataType type = std::get<1>(output_attrs[col_idx]);
             result_table.columns.emplace_back(type);
             Column& global_col = result_table.columns.back();
-            
+
             for (auto& t_vec : thread_results) {
                 if (col_idx >= t_vec.size()) continue;
                 auto& writer = t_vec[col_idx];
-                
+
                 if (writer.col) {
-                    writer.finalize(); 
-                    global_col.pages.insert(global_col.pages.end(), 
-                                            writer.col->pages.begin(), 
+                    writer.finalize();
+                    global_col.pages.insert(global_col.pages.end(),
+                                            writer.col->pages.begin(),
                                             writer.col->pages.end());
                     writer.col->pages.clear();
                 }
             }
         }
-        
+
         if (!result_table.columns.empty()) {
             size_t rows = 0;
             for (auto* page : result_table.columns[0].pages) {
@@ -589,9 +693,9 @@ ColumnarTable execute_hash_join_root(const Plan& plan,
 
         return result_table;
     };
-    
+
     struct IntTag { using type = int32_t; };
-    DataType key_type = build_left ? std::get<1>(left_types[join.left_attr]) 
+    DataType key_type = build_left ? std::get<1>(left_types[join.left_attr])
                                         : std::get<1>(right_types[join.right_attr]);
 
     if (key_type == DataType::INT32) {
@@ -669,7 +773,7 @@ ExecuteResult execute_scan(const Plan& plan,
 
     ExecuteResult results;
     results.resize(output_attrs.size());
-    
+
     for (size_t out_col = 0; out_col < output_attrs.size(); ++out_col) {
         auto in_col_idx = std::get<0>(output_attrs[out_col]);
         auto& column    = input.columns[in_col_idx];
@@ -678,7 +782,7 @@ ExecuteResult execute_scan(const Plan& plan,
         // =========================================================
         // ZERO-COPY VIEW OPTIMIZATION
         // =========================================================
-        // If the column has no nulls and is INT32, we can reuse the 
+        // If the column has no nulls and is INT32, we can reuse the
         // raw page buffers directly without copying data.
         if (column.type == DataType::INT32) {
             bool all_no_nulls = true;
@@ -695,7 +799,7 @@ ExecuteResult execute_scan(const Plan& plan,
                 page_data_ptrs.reserve(column.pages.size());
                 for (auto* p : column.pages) page_data_ptrs.push_back(p->data);
                 target_col.set_view_pages(page_data_ptrs, total_items, DataType::INT32);
-                continue; 
+                continue;
             }
         }
 
@@ -720,7 +824,9 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return execute_hash_join(plan, value, node.output_attrs);
+                auto result = execute_hash_join(plan, value, node.output_attrs);
+                MAT_RECORD(node_idx, result);
+                return result;
             } else {
                 return execute_scan(plan, value, node.output_attrs);
             }
@@ -730,6 +836,7 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     reset_string_columns();
+    MAT_ANALYZE(plan);
     auto& root_node = plan.nodes[plan.root];
     auto& j = std::get<JoinNode>(root_node.data);
     return execute_hash_join_root(plan, j, root_node.output_attrs);
