@@ -48,12 +48,15 @@ A `Plan` is a tree of scans and equi-joins over paged columnar tables (INT32 and
 include/hashtable/     unchained hash table, Bloom tags, hash functions, slab allocator
 include/engine/        column/value representation, page pools, thread pool
 include/baselines/     open-addressing tables from the first version (Robin Hood, Hopscotch, Cuckoo)
-src/execute.cpp        query execution: scan, join, merge, root output
+src/execute.cpp        entry point: runs a query plan
+src/scan.cpp           scans of the input tables
+src/join.cpp           hash joins: build, batched probe, merge, root output
+src/lazy_strings.cpp   string references, resolved only at output
 tests/                 Catch2 unit and regression tests
 docs/REPORT.md         design and optimization report
 ```
 
-The query harness, plan and table definitions (`include/plan.h`, `table.h`, `attribute.h`, …, `tests/read_sql.cpp`, `src/build_table.cpp`, `src/statement.cpp`, `src/csv_parser.cpp`) and the JOB queries come from the contest and course materials. The engine is everything under `include/hashtable`, `include/engine` and `src/execute.cpp`, plus the tests and CI.
+The query harness, plan and table definitions (`include/plan.h`, `table.h`, `attribute.h`, …, `tests/read_sql.cpp`, `src/build_table.cpp`, `src/statement.cpp`, `src/csv_parser.cpp`) and the JOB queries come from the contest and course materials. The engine is everything under `include/hashtable`, `include/engine` and `src/execute.cpp`, `scan.cpp`, `join.cpp`, `lazy_strings.cpp`, plus the tests and CI.
 
 ## Build and run
 

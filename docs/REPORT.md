@@ -9,7 +9,7 @@ This report covers how the engine went from 225 s to 1.9 s on the 113 JOB querie
 - **Measurements:**
   - Every number in the rework log is the **median of 5 runs** on mains power. A laptop on battery throttles by about 20%, which is larger than most of the individual gains.
   - Correctness was checked on every step: all 113 results must match the reference.
-  - Phase timers (compiled in with `#define PHASE_TIMERS` in `src/execute.cpp`) split each run into scan, build, probe, merge and root output. `perf` with DWARF call graphs (`RelWithDebInfo`) showed where the time went inside each phase.
+  - Phase timers (compiled in with `#define PHASE_TIMERS` in `include/engine/instrumentation.h`) split each run into scan, build, probe, merge and root output. `perf` with DWARF call graphs (`RelWithDebInfo`) showed where the time went inside each phase.
 
 ## Part 1: from 225 s to 8 s
 
@@ -102,5 +102,4 @@ Half of the total runtime is spent in 12 queries (16b, 8c, 13d, 19d, 8d, 17e, 26
 ## Next steps
 
 - **Join ordering with estimated output sizes** (sampling, as the winning contest team did), building on the `join-order` branch.
-- **Split `src/execute.cpp`** into scan, join and output units as part of that change.
 - **Further directions.** The fastest contest entries also reorder joins using cardinality estimates and compile pipelines instead of interpreting them. Both are bigger architectural changes.
