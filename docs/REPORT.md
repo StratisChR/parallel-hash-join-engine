@@ -81,6 +81,8 @@ Half of the total runtime is spent in 12 queries (16b, 8c, 13d, 19d, 8d, 17e, 26
 - **Contiguous-copy merge.** Replacing the per-element merge with contiguous copies made no measurable difference (4279 vs 4280 ms), because the copying itself was cheap. Avoiding the copy altogether (row 6) did help.
 - **Binary search for lazy strings.** The first version of lazy strings found a row's page with `upper_bound`, which cost about 100 ns per value and wiped out the gain. A per-column block table (one entry per 1,024 rows) brought it to about 60 ns and made the change pay off.
 - **Measuring on battery.** It gives numbers that are about 20% slower and swing between runs, which led to false conclusions twice.
+- **Late materialization.** Before building it, I counted what the intermediate joins write: 60% of the values are join keys that any design must keep, and the rest come almost entirely from tables that contribute a single output column. Replacing them with row ids would write 99% as many values. Lazy strings had already removed the expensive part (copying strings), so the idea was dropped.
+- **Greedy join ordering at run time.** Joining the two smallest current inputs first, using exact sizes, was 6% slower than the plans' order (median 2036 vs 1928 ms) and produced more intermediate rows (186 M vs 110 M). Input size is a poor guide: the rule joined large tables with tiny lookup tables that barely filter them, and postponed very selective joins because one side was large. Some queries did get much faster (13d 107 → 44 ms, 7a 56 → 12 ms), so a better choice per query could save about 11%, but only with good estimates of each join's output size, e.g. by sampling. The code is on the `join-order` branch.
 
 ## Testing
 
@@ -99,6 +101,6 @@ Half of the total runtime is spent in 12 queries (16b, 8c, 13d, 19d, 8d, 17e, 26
 
 ## Next steps
 
-- **Late materialization.** Intermediate joins still copy every needed column value through each join. Carrying row numbers instead and fetching values only at the root should cut most of the probe-side writing in the 12 heaviest queries.
+- **Join ordering with estimated output sizes** (sampling, as the winning contest team did), building on the `join-order` branch.
 - **Split `src/execute.cpp`** into scan, join and output units as part of that change.
 - **Further directions.** The fastest contest entries also reorder joins using cardinality estimates and compile pipelines instead of interpreting them. Both are bigger architectural changes.
