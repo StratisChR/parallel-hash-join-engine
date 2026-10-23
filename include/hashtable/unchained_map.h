@@ -8,11 +8,11 @@
 #include <thread>
 #include <atomic>
 
-#include "ex2_task3_hashes.h"
-#include "ex2_task3_bloom.h"
-#include "indexing.h"
-#include "unchnd_structs.h" 
-#include "threads.h"
+#include "hashtable/hash.h"
+#include "hashtable/bloom.h"
+#include "engine/column.h"
+#include "hashtable/detail/structs.h" 
+#include "engine/thread_pool.h"
 
 /*  Hash Map Implementation:
     In the second Assignment we had created the unchained hashmap in the wrong way.
@@ -87,6 +87,6 @@ private:
     
 };
 
-#include "unchnd_helpers.tpp"
-#include "unchnd_helpers_prll.tpp"
-#include "unchnd_public.tpp"
+#include "hashtable/detail/helpers.tpp"
+#include "hashtable/detail/helpers_parallel.tpp"
+#include "hashtable/detail/public.tpp"

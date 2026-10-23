@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <cstring>
 
-#include "unchained_map.h"
-#include "threads.h"
-#include "indexing.h"
+#include "hashtable/unchained_map.h"
+#include "engine/thread_pool.h"
+#include "engine/column.h"
 
 
 namespace Contest {

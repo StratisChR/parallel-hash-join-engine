@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <utility>
 #include <iterator>
-#include <int_hasher.h> // Include the new hasher
+#include "baselines/int_hasher.h" // Include the new hasher
 
 namespace Contest {
 

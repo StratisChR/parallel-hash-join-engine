@@ -22,10 +22,10 @@
 #include <plan.h>
 #include <table.h>
 
-#include "ex2_task3_bloom.h"
-#include "indexing.h"
-#include "threads.h"
-#include "unchained_map.h"
+#include "hashtable/bloom.h"
+#include "engine/column.h"
+#include "engine/thread_pool.h"
+#include "hashtable/unchained_map.h"
 
 using namespace std::string_literals;
 

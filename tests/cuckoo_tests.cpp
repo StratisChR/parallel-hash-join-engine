@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include <int_hasher.h>
-#include <cuckoo_hash_map.h>
+#include "baselines/int_hasher.h"
+#include "baselines/cuckoo_hash_map.h"
 
 #include <set>
 

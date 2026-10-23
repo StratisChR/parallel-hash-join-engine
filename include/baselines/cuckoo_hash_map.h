@@ -4,7 +4,7 @@
 #include <utility>
 #include <functional>
 #include <cstddef>
-#include <int_hasher.h>
+#include "baselines/int_hasher.h"
 
 namespace Contest {
 

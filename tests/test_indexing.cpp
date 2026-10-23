@@ -1,6 +1,6 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
-#include "indexing.h" 
+#include "engine/column.h" 
 
 // ------------------------------------------------------------
 // Helper to unpack a constructed StringRef using bit masks

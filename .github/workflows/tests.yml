@@ -30,7 +30,7 @@ jobs:
       - name: Build tests
         run: >
           cmake --build build -j"$(nproc)" --target
-          unit_tests regression_tests test_algorithms test_indexing ex2_task3_hashes_tests
+          unit_tests regression_tests test_algorithms test_indexing hash_function_tests
 
       - name: End-to-end join tests
         run: ./build/unit_tests
@@ -42,7 +42,7 @@ jobs:
         run: |
           ./build/test_algorithms
           ./build/test_indexing
-          ./build/ex2_task3_hashes_tests
+          ./build/hash_function_tests
 
   sanitizers:
     name: Tests under AddressSanitizer + UndefinedBehaviorSanitizer

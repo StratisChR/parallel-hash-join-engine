@@ -1,8 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <vector>
-#include "unchnd_slab_alloc.h" 
-#include "indexing.h"
+#include "hashtable/detail/slab_alloc.h" 
+#include "engine/column.h"
 
 // The struct our 3 slab allocator uses to save tuples.
 struct BuildTuple{
