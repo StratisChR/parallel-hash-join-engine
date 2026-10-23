@@ -19,3 +19,5 @@ baseline_*.txt
 *.zip
 spawn
 spawn.cpp
+harness*.txt
+joins*.txt
