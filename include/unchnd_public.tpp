@@ -117,16 +117,6 @@ void UnchainedHashMap<Key, Value>::lookup(Key key, Func process_match) {
     }
 }
 
-// Not currently used:
-template <class Key, class Value>
-void UnchainedHashMap<Key, Value>::prefetch_directory(Key key) const {
-    uint64_t hashed_key = hash32(static_cast<uint32_t>(key), 0);
-    // uint64_t hashed_key = fibonacci_hash(static_cast<uint64_t>(key));
-    uint64_t slot = get_slot(hashed_key);
-    
-    __builtin_prefetch(&directory[slot], 0, 3);
-}
-
 template <class Key, class Value>
 template <typename Func>
 void UnchainedHashMap<Key, Value>::lookup_batch(const int32_t* keys, size_t n, Func on_match) const {

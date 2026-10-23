@@ -92,7 +92,7 @@ add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
 add_executable(test_algorithms ${SIGMODPC_SRC} tests/test_hopscotch.cpp tests/hash_unit_tests.cpp tests/cuckoo_tests.cpp)
 add_executable(test_indexing ${SIGMODPC_SRC} tests/test_indexing.cpp)
 add_executable(build_database tests/build_database.cpp)
-add_executable(ex2_task3_hashes_tests ${SIGMODPC_SRC} tests/ex2_task3_hashes_tests.cpp tests/ex2_task3_hashmap_test.cpp)
+add_executable(ex2_task3_hashes_tests ${SIGMODPC_SRC} tests/ex2_task3_hashes_tests.cpp)
 add_executable(regression_tests ${SIGMODPC_SRC} tests/regression_tests.cpp)
 
 # For all executables

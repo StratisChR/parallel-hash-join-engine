@@ -29,7 +29,6 @@
 template <class Key, class Value>
 class UnchainedHashMap {
 private:
-    static constexpr int32_t EMPTY_KEY = std::numeric_limits<int32_t>::min();
     static constexpr uint64_t BLOOM_MASK   = 0x000000000000FFFF;
 
     // L1 Data Cache is 32KB for my laptop.
@@ -65,9 +64,7 @@ public:
     static constexpr size_t PROBE_BATCH = 256;
     template <typename Func>
     void lookup_batch(const int32_t* keys, size_t n, Func on_match) const;
-    // The following is not currently used, I was working on something which
-    // might be a good idea.
-    void prefetch_directory(Key key) const;
+    
 
 private: 
     // --- Internal Helpers ---
@@ -88,13 +85,6 @@ private:
 
     inline uint64_t get_slot(uint64_t hash) const { return hash >> shift; }
     
-    inline SegmentCache get_segment_info(uint64_t slot) const {
-        uint64_t entry = directory[slot];
-        uint64_t end = entry >> 16;
-        uint64_t start = (directory[slot - 1] >> 16);
-        uint16_t bloom = static_cast<uint16_t>(entry & BLOOM_MASK);
-        return {start, end, bloom};
-    }
 };
 
 #include "unchnd_helpers.tpp"

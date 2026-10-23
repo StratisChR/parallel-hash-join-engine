@@ -4,14 +4,6 @@
 #include "unchnd_slab_alloc.h" 
 #include "indexing.h"
 
-// Info for segments: I used to have different helpers to get info for each segment
-// of the directory. Using this inside "get_segment_info" is cleaner.
-struct SegmentCache {
-    uint64_t start;
-    uint64_t end;
-    uint16_t bloom;
-};
-
 // The struct our 3 slab allocator uses to save tuples.
 struct BuildTuple{
     int32_t  key;
